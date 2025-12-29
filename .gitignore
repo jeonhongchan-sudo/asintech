@@ -1,0 +1,13 @@
+# 보안 파일 (절대 올리면 안 됨)
+db_config.json
+secrets.json
+*.key
+
+# Google Apps Script (GAS에서 관리하므로 제외하고 싶다면)
+Code.gs
+appsscript.json
+
+# 시스템 및 파이썬 캐시 파일
+Thumbs.db
+__pycache__/
+*.pyc
