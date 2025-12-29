@@ -14,6 +14,21 @@ R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
 R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME")
 
+# [추가] 필수 환경 변수 검증 로직
+required_vars = {
+    "SUPABASE_URL": SUPABASE_URL,
+    "SUPABASE_KEY": SUPABASE_KEY,
+    "R2_ACCOUNT_ID": R2_ACCOUNT_ID,
+    "R2_ACCESS_KEY_ID": R2_ACCESS_KEY_ID,
+    "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY,
+    "R2_BUCKET_NAME": R2_BUCKET_NAME
+}
+
+missing = [key for key, val in required_vars.items() if not val]
+if missing:
+    print(f"Error: 다음 환경 변수들이 GitHub Secrets에 설정되지 않았습니다: {', '.join(missing)}")
+    sys.exit(1)
+
 def download_json(project_id):
     """Supabase Storage에서 JSON 파일 다운로드"""
     print(f"Downloading JSON for Project {project_id}...")
