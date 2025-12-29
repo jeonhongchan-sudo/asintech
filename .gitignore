@@ -11,3 +11,8 @@ appsscript.json
 Thumbs.db
 __pycache__/
 *.pyc
+
+# 사용자 요청 제외 항목 (로컬 보존, 리모트 삭제)
+Asin-webapp/
+Export_Json(ODB, LDB).lsp
+projects_cache.json
