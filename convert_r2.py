@@ -5,6 +5,8 @@ import subprocess
 import boto3
 import requests
 from botocore.client import Config
+import shapely.wkt
+import shapely.geometry
 
 # 환경 변수 로드 (GitHub Secrets에서 주입됨)
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -53,6 +55,56 @@ def download_json(project_id):
         print(f"Error downloading file: {response.status_code} - {response.text}")
         return False
 
+def convert_to_geojson():
+    """다운로드한 JSON(리스트)을 GeoJSON(FeatureCollection)으로 변환"""
+    print("Converting raw JSON to GeoJSON...")
+    try:
+        with open("input.json", "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+        
+        # 이미 GeoJSON 형식이면 그대로 저장
+        if isinstance(raw_data, dict) and raw_data.get('type') == 'FeatureCollection':
+            print("Input is already GeoJSON.")
+            with open("input.geojson", "w", encoding="utf-8") as f:
+                json.dump(raw_data, f)
+            return True
+
+        features = []
+        if isinstance(raw_data, list):
+            for item in raw_data:
+                geom = None
+                # 1. WKT 파싱 시도
+                wkt_raw = item.get('wkt') or item.get('geom')
+                if wkt_raw:
+                    # SRID 제거 (SRID=4326;POINT(...) -> POINT(...))
+                    if wkt_raw.startswith('SRID='):
+                        wkt_raw = wkt_raw.split(';', 1)[1]
+                    try:
+                        g = shapely.wkt.loads(wkt_raw)
+                        geom = shapely.geometry.mapping(g)
+                    except Exception as e:
+                        print(f"Failed to parse WKT: {e}")
+                
+                # 2. WKT가 없으면 x, y 좌표 사용
+                if not geom and 'x' in item and 'y' in item:
+                    try:
+                        geom = {"type": "Point", "coordinates": [float(item['x']), float(item['y'])]}
+                    except:
+                        pass
+                
+                if geom:
+                    features.append({ "type": "Feature", "geometry": geom, "properties": item })
+        
+        geojson = { "type": "FeatureCollection", "features": features }
+        
+        with open("input.geojson", "w", encoding="utf-8") as f:
+            json.dump(geojson, f)
+        print(f"Converted {len(features)} items to GeoJSON.")
+        return True
+    except Exception as e:
+        print(f"GeoJSON conversion error: {e}")
+        return False
+
 def convert_to_pmtiles():
     """Tippecanoe를 사용하여 JSON을 PMTiles로 변환"""
     print("Converting to PMTiles...")
@@ -68,7 +120,7 @@ def convert_to_pmtiles():
         "--force",
         "-zg", 
         "--drop-rate=1",
-        "input.json"
+        "input.geojson"
     ]
     
     try:
@@ -116,12 +168,13 @@ if __name__ == "__main__":
     project_id = sys.argv[1]
     
     if download_json(project_id):
-        if convert_to_pmtiles():
-            if upload_to_r2(project_id):
-                print("All steps completed successfully.")
+        if convert_to_geojson(): # [추가] GeoJSON 변환 단계
+            if convert_to_pmtiles():
+                if upload_to_r2(project_id):
+                    print("All steps completed successfully.")
+                else:
+                    sys.exit(1)
             else:
                 sys.exit(1)
         else:
             sys.exit(1)
-    else:
-        sys.exit(1)
