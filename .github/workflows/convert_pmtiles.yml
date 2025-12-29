@@ -1,0 +1,43 @@
+name: Convert CAD to PMTiles
+
+on:
+  repository_dispatch:
+    types: [convert_cad]  # 외부(GAS 등)에서 이 신호를 보내면 실행됨
+
+jobs:
+  convert-and-upload:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Install Tippecanoe
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y make g++ libsqlite3-dev zlib1g-dev
+        git clone https://github.com/felt/tippecanoe.git
+        cd tippecanoe
+        make -j
+        sudo make install
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Run Conversion Script
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      run: |
+        # 이벤트로 전달받은 project_id를 파이썬 스크립트에 전달
+        python convert_r2.py "${{ github.event.client_payload.project_id }}"
