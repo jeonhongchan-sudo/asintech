@@ -46,7 +46,7 @@ def get_supabase_client():
         return None
     
     # [디버깅] 설정 확인 (보안을 위해 앞부분만 출력)
-    print(f"🔍 Supabase Config Check: URL={SUPABASE_URL[:15]}..., KEY={SUPABASE_KEY[:5]}...")
+    print(f"🔍 Supabase Config Check: URL={SUPABASE_URL[:15]}..., KEY={SUPABASE_KEY[:5]}...{SUPABASE_KEY[-5:]}")
     
     try:
         return create_client(SUPABASE_URL, SUPABASE_KEY)
