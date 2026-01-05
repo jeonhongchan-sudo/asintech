@@ -15,12 +15,12 @@ except ImportError as e:
     create_client = None
 
 # 환경 변수 로드 (GitHub Secrets에서 주입됨)
-R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
-R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
-R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
-R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "").strip()
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "").strip()
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "").strip()
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "").strip()
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
 
 # [추가] 필수 환경 변수 검증 로직
 required_vars = {
@@ -44,6 +44,10 @@ def get_supabase_client():
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("⚠️ Supabase client creation skipped: Missing URL or KEY.")
         return None
+    
+    # [디버깅] 설정 확인 (보안을 위해 앞부분만 출력)
+    print(f"🔍 Supabase Config Check: URL={SUPABASE_URL[:15]}..., KEY={SUPABASE_KEY[:5]}...")
+    
     try:
         return create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
