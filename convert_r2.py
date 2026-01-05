@@ -9,7 +9,9 @@ import ezdxf
 from pyproj import Transformer
 try:
     from supabase import create_client
-except ImportError:
+    print("✅ Supabase library imported successfully.")
+except ImportError as e:
+    print(f"❌ Failed to import supabase: {e}")
     create_client = None
 
 # 환경 변수 로드 (GitHub Secrets에서 주입됨)
@@ -36,8 +38,16 @@ if missing:
     sys.exit(1)
 
 def get_supabase_client():
-    if create_client and SUPABASE_URL and SUPABASE_KEY:
+    if not create_client:
+        print("⚠️ Supabase client creation skipped: Library not imported.")
+        return None
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("⚠️ Supabase client creation skipped: Missing URL or KEY.")
+        return None
+    try:
         return create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as e:
+        print(f"❌ Supabase client initialization failed: {e}")
     return None
 
 def get_r2_client():
@@ -201,6 +211,7 @@ def upload_to_r2(project_id, cache_control):
         print(f"Upload success: {file_name}")
         
         # Supabase 메타데이터 업데이트
+        print("🔄 Updating Supabase metadata...")
         supabase = get_supabase_client()
         if supabase:
             try:
@@ -220,7 +231,9 @@ def upload_to_r2(project_id, cache_control):
                     supabase.table("cad_files").insert(data).execute()
                 print("Supabase metadata updated.")
             except Exception as e:
-                print(f"Supabase update failed: {e}")
+                print(f"❌ Supabase update failed: {e}")
+        else:
+            print("⚠️ Supabase client is not available. Metadata update skipped.")
 
         return True
     except Exception as e:
