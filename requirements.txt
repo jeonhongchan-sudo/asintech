@@ -1,3 +1,6 @@
 boto3
 requests
+ezdxf
 shapely
+pyproj
+supabase

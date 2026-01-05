@@ -39,5 +39,5 @@ jobs:
         R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
       run: |
-        # 이벤트로 전달받은 project_id를 파이썬 스크립트에 전달
-        python convert_r2.py "${{ github.event.client_payload.project_id }}"
+        # client_payload 전체를 JSON 문자열로 전달
+        python convert_r2.py '${{ toJson(github.event.client_payload) }}'
