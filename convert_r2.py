@@ -105,6 +105,11 @@ def dxf_to_geojson(source_crs, target_layers):
                 coords = []
                 props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype}
 
+                # [추가] 색상(ACI) 및 회전(Rotation) 정보 저장
+                props['color'] = e.dxf.get('color', 256)  # 256: ByLayer
+                if e.dxf.hasattr('rotation'):
+                    props['rotation'] = e.dxf.rotation
+
                 if dxftype in ['TEXT', 'MTEXT']:
                     props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
 
