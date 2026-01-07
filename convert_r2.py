@@ -108,7 +108,8 @@ def dxf_to_geojson(source_crs, target_layers):
                 # [추가] 색상(ACI) 및 회전(Rotation) 정보 저장
                 props['color'] = e.dxf.get('color', 256)  # 256: ByLayer
                 if e.dxf.hasattr('rotation'):
-                    props['rotation'] = e.dxf.rotation
+                    # DXF는 반시계(CCW), 웹(Mapbox/MapLibre)은 시계(CW) 방향이므로 부호 반전
+                    props['rotation'] = -float(e.dxf.rotation)
 
                 if dxftype in ['TEXT', 'MTEXT']:
                     props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
