@@ -183,6 +183,13 @@ def json_to_supabase_and_geojson(project_id, source_crs):
     supabase = get_supabase_client()
     if not supabase: return False
 
+    # [추가] 좌표 변환기 초기화 (Source CRS -> WGS84)
+    try:
+        transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
+    except Exception as e:
+        print(f"❌ Invalid CRS {source_crs}: {e}")
+        return False
+
     try:
         # 1. Load JSON
         with open("input.json", "rb") as f:
@@ -196,9 +203,52 @@ def json_to_supabase_and_geojson(project_id, source_crs):
         # 2. Prepare Data for Insert
         insert_rows = []
         for obj in data:
-            geom_str = obj.get('wkt')
-            if geom_str and not geom_str.startswith('SRID='):
-                geom_str = f"SRID=4326;{geom_str}"
+            x = obj.get('x')
+            y = obj.get('y')
+            wkt = obj.get('wkt')
+            
+            tx, ty = None, None
+            final_wkt = None
+            
+            # 1) X, Y 좌표 변환
+            if x is not None and y is not None:
+                try:
+                    tx, ty = transformer.transform(float(x), float(y))
+                except: pass
+            
+            # 2) WKT 변환 (POINT, LINESTRING 지원)
+            if wkt:
+                clean_wkt = wkt.split(';')[-1] if ';' in wkt else wkt
+                clean_wkt = clean_wkt.strip().upper()
+                try:
+                    if clean_wkt.startswith("POINT"):
+                        content = clean_wkt[clean_wkt.find("(")+1 : clean_wkt.find(")")]
+                        parts = content.split()
+                        if len(parts) >= 2:
+                            px, py = float(parts[0]), float(parts[1])
+                            tpx, tpy = transformer.transform(px, py)
+                            final_wkt = f"SRID=4326;POINT({tpx} {tpy})"
+                            if tx is None: tx, ty = tpx, tpy
+                    elif clean_wkt.startswith("LINESTRING"):
+                        content = clean_wkt[clean_wkt.find("(")+1 : clean_wkt.find(")")]
+                        pairs = content.split(',')
+                        new_pairs = []
+                        for pair in pairs:
+                            parts = pair.strip().split()
+                            if len(parts) >= 2:
+                                px, py = float(parts[0]), float(parts[1])
+                                tpx, tpy = transformer.transform(px, py)
+                                new_pairs.append(f"{tpx} {tpy}")
+                        if new_pairs:
+                            final_wkt = f"SRID=4326;LINESTRING({', '.join(new_pairs)})"
+                except: pass
+            
+            # 3) 최종 WKT 결정 (변환된 좌표 우선)
+            if not final_wkt:
+                if tx is not None and ty is not None:
+                    final_wkt = f"SRID=4326;POINT({tx} {ty})"
+                elif wkt:
+                    final_wkt = f"SRID=4326;{clean_wkt}"
             
             row = {
                 "project_id": int(project_id),
@@ -206,10 +256,10 @@ def json_to_supabase_and_geojson(project_id, source_crs):
                 "layer": obj.get('layer'),
                 "block_name": obj.get('block_name'),
                 "text_content": obj.get('text'),
-                "x_coord": obj.get('x'),
-                "y_coord": obj.get('y'),
+                "x_coord": tx if tx is not None else x,
+                "y_coord": ty if ty is not None else y,
                 "rotation": obj.get('rotation'),
-                "geom": geom_str
+                "geom": final_wkt
             }
             insert_rows.append(row)
 
@@ -225,14 +275,14 @@ def json_to_supabase_and_geojson(project_id, source_crs):
         
         # 4. Fetch Data as GeoJSON (Using Python conversion for simplicity and reliability)
         # Supabase에서 데이터를 다시 조회하여 GeoJSON 생성 (PostGIS의 정확성 활용)
-        print("Fetching data for GeoJSON conversion...")
+        print("Fetching data and generating GeoJSON...")
         
         # 페이지네이션으로 전체 데이터 조회
         all_rows = []
         current = 0
         limit = 1000
         while True:
-            res = supabase.table("cad_objects").select("handle, layer, text_content, geom").eq("project_id", project_id).range(current*limit, (current+1)*limit-1).execute()
+            res = supabase.table("cad_objects").select("handle, layer, text_content, geom, rotation").eq("project_id", project_id).range(current*limit, (current+1)*limit-1).execute()
             if not res.data: break
             all_rows.extend(res.data)
             if len(res.data) < limit: break
@@ -270,6 +320,9 @@ def json_to_supabase_and_geojson(project_id, source_crs):
             
             if geom_type and geom_type in features_map:
                 props = {"handle": row['handle'], "layer": row['layer'], "text": row['text_content']}
+                if row.get('rotation'):
+                    props['rotation'] = -float(row['rotation']) # Web용 회전 보정 (CCW -> CW)
+                
                 feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
                 features_map[geom_type].append(feat)
 
