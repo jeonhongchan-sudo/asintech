@@ -77,6 +77,20 @@ def download_dxf_from_r2(project_id):
         print(f"Error downloading DXF: {e}")
         return False
 
+def download_json_from_r2(project_id):
+    """R2에서 JSON 파일 다운로드"""
+    print(f"Downloading JSON for Project {project_id} from R2...")
+    s3 = get_r2_client()
+    key = f"cad_data/CAD_{project_id}.json"
+    
+    try:
+        s3.download_file(R2_BUCKET_NAME, key, "input.json")
+        print("JSON Download complete.")
+        return True
+    except Exception as e:
+        print(f"Error downloading JSON: {e}")
+        return False
+
 def dxf_to_geojson(source_crs, target_layers):
     """DXF 파일을 GeoJSON으로 변환 (pyproj 좌표계 변환 및 레이어 필터링 적용)"""
     print(f"Converting DXF to GeoJSON (CRS: {source_crs})...")
@@ -92,7 +106,8 @@ def dxf_to_geojson(source_crs, target_layers):
 
         def process_entity(e):
             try:
-                if e.dxf.layer not in target_layers: return
+                # [수정] target_layers가 비어있으면 모든 레이어 처리
+                if target_layers and e.dxf.layer not in target_layers: return
 
                 dxftype = e.dxftype()
                 if dxftype == 'INSERT':
@@ -160,6 +175,104 @@ def dxf_to_geojson(source_crs, target_layers):
         return True
     except Exception as e:
         print(f"GeoJSON conversion error: {e}")
+        return False
+
+def json_to_supabase_and_geojson(project_id, source_crs):
+    """JSON -> Supabase Insert -> GeoJSON Export"""
+    print("Processing JSON workflow...")
+    supabase = get_supabase_client()
+    if not supabase: return False
+
+    try:
+        # 1. Load JSON
+        with open("input.json", "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        
+        # 2. Prepare Data for Insert
+        insert_rows = []
+        for obj in data:
+            geom_str = obj.get('wkt')
+            if geom_str and not geom_str.startswith('SRID='):
+                geom_str = f"SRID=4326;{geom_str}"
+            
+            row = {
+                "project_id": int(project_id),
+                "handle": obj.get('handle'),
+                "layer": obj.get('layer'),
+                "block_name": obj.get('block_name'),
+                "text_content": obj.get('text'),
+                "x_coord": obj.get('x'),
+                "y_coord": obj.get('y'),
+                "rotation": obj.get('rotation'),
+                "geom": geom_str
+            }
+            insert_rows.append(row)
+
+        # 3. Delete Old Data & Insert New (Batch)
+        print(f"Deleting old data for project {project_id}...")
+        supabase.table("cad_objects").delete().eq("project_id", project_id).execute()
+        
+        print(f"Inserting {len(insert_rows)} rows...")
+        batch_size = 1000
+        for i in range(0, len(insert_rows), batch_size):
+            batch = insert_rows[i:i+batch_size]
+            supabase.table("cad_objects").insert(batch).execute()
+        
+        # 4. Fetch Data as GeoJSON (Using Python conversion for simplicity and reliability)
+        # Supabase에서 데이터를 다시 조회하여 GeoJSON 생성 (PostGIS의 정확성 활용)
+        print("Fetching data for GeoJSON conversion...")
+        
+        # 페이지네이션으로 전체 데이터 조회
+        all_rows = []
+        current = 0
+        limit = 1000
+        while True:
+            res = supabase.table("cad_objects").select("handle, layer, text_content, geom").eq("project_id", project_id).range(current*limit, (current+1)*limit-1).execute()
+            if not res.data: break
+            all_rows.extend(res.data)
+            if len(res.data) < limit: break
+            current += 1
+            
+        features_map = {'Point': [], 'LineString': []}
+        
+        # WKT 파싱을 위해 shapely 사용 (없으면 간단한 파싱)
+        # GitHub Action 환경에는 shapely가 없을 수 있으므로 ezdxf/pyproj 외존성만 사용하거나
+        # 여기서는 간단히 WKT 문자열 처리를 수행 (POINT, LINESTRING만 처리)
+        
+        for row in all_rows:
+            wkt = row['geom'] # SRID=4326;POINT(...)
+            if not wkt: continue
+            if ';' in wkt: wkt = wkt.split(';')[1]
+            
+            geom_type = None
+            coords = []
+            
+            if wkt.startswith("POINT"):
+                geom_type = "Point"
+                # POINT(127.1 37.5)
+                content = wkt[6:-1]
+                coords = list(map(float, content.split()))
+            elif wkt.startswith("LINESTRING"):
+                geom_type = "LineString"
+                # LINESTRING(127.1 37.5, 127.2 37.6)
+                content = wkt[11:-1]
+                coords = [list(map(float, p.strip().split())) for p in content.split(',')]
+            
+            if geom_type:
+                props = {"handle": row['handle'], "layer": row['layer'], "text": row['text_content']}
+                feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
+                features_map[geom_type].append(feat)
+
+        if features_map['Point']:
+            with open("temp_point.geojson", "w", encoding="utf-8") as f:
+                json.dump({"type": "FeatureCollection", "features": features_map['Point']}, f, ensure_ascii=False)
+        if features_map['LineString']:
+            with open("temp_line.geojson", "w", encoding="utf-8") as f:
+                json.dump({"type": "FeatureCollection", "features": features_map['LineString']}, f, ensure_ascii=False)
+        
+        return True
+    except Exception as e:
+        print(f"JSON workflow error: {e}")
         return False
 
 def convert_to_pmtiles():
@@ -262,20 +375,28 @@ if __name__ == "__main__":
         source_crs = payload.get('source_crs', 'EPSG:5187')
         layers = payload.get('layers', [])
         cache_control = payload.get('cache_control', 'no-cache')
+        input_type = payload.get('input_type', 'dxf') # dxf or json
         
-        print(f"Starting conversion for Project {project_id}")
+        print(f"Starting conversion for Project {project_id} (Type: {input_type})")
         
-        if download_dxf_from_r2(project_id):
-            if dxf_to_geojson(source_crs, layers):
-                if convert_to_pmtiles():
-                    if upload_to_r2(project_id, cache_control):
-                        print("All steps completed successfully.")
-                    else:
-                        sys.exit(1)
-                else:
-                    sys.exit(1)
-            else:
-                sys.exit(1)
+        success = False
+        
+        if input_type == 'json':
+            if download_json_from_r2(project_id):
+                if json_to_supabase_and_geojson(project_id, source_crs):
+                    if convert_to_pmtiles():
+                        if upload_to_r2(project_id, cache_control):
+                            success = True
+        else:
+            # Default DXF workflow
+            if download_dxf_from_r2(project_id):
+                if dxf_to_geojson(source_crs, layers):
+                    if convert_to_pmtiles():
+                        if upload_to_r2(project_id, cache_control):
+                            success = True
+
+        if success:
+            print("All steps completed successfully.")
         else:
             sys.exit(1)
             
