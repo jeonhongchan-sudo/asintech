@@ -114,7 +114,7 @@ def dxf_to_geojson(source_crs, target_layers):
                     for sub_e in e.virtual_entities(): process_entity(sub_e)
                     return
 
-                if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE']: return
+                if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE']: return
 
                 geom_type = None
                 coords = []
@@ -155,6 +155,15 @@ def dxf_to_geojson(source_crs, target_layers):
                     geom_type = "Point"
                     p = e.dxf.insert if dxftype in ['TEXT', 'MTEXT'] else e.dxf.location
                     coords = transformer.transform(p[0], p[1])
+                elif dxftype in ['ARC', 'SPLINE', 'ELLIPSE']:
+                    # [추가] 곡선(Arc, Spline, Ellipse)을 LineString으로 변환 (DB 없이 처리)
+                    try:
+                        # flattening(sagitta): 곡선을 직선으로 근사 (0.001 = 1mm 정밀도 유지)
+                        points = list(e.flattening(0.001))
+                        if len(points) >= 2:
+                            coords = [transformer.transform(p[0], p[1]) for p in points]
+                            geom_type = "LineString"
+                    except: pass
 
                 if geom_type and coords:
                     feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
@@ -345,10 +354,12 @@ def convert_to_pmtiles():
     cmd = [
         "tippecanoe",
         "-o", "output.pmtiles",
-        "-zg", 
+        "-z24", # Max zoom 24 (약 0.58mm 정밀도 -> 소수점 3자리 완벽 지원)
         "--drop-densest-as-needed",
         "--extend-zooms-if-still-dropping",
-        "--force"
+        "--force",
+        "--no-line-simplification", # 라인 단순화 방지 (CAD 원본 형상 유지)
+        "--no-tiny-polygon-reduction" # 아주 작은 폴리곤도 삭제하지 않고 유지
     ]
     
     has_input = False
