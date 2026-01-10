@@ -355,7 +355,6 @@ def convert_to_pmtiles():
         "tippecanoe",
         "-o", "output.pmtiles",
         "-z22", # Max zoom 22 (약 3cm 정밀도)
-        "-r1", # 줌 축소 시 텍스트/객체 유지 비율 높임
         "--drop-densest-as-needed",
         "--extend-zooms-if-still-dropping",
         "--force",
