@@ -245,25 +245,30 @@ def json_to_supabase_and_geojson(project_id, source_crs):
         # 여기서는 간단히 WKT 문자열 처리를 수행 (POINT, LINESTRING만 처리)
         
         for row in all_rows:
-            wkt = row['geom'] # SRID=4326;POINT(...)
-            if not wkt: continue
-            if ';' in wkt: wkt = wkt.split(';')[1]
+            geom_val = row['geom']
+            if not geom_val: continue
             
             geom_type = None
             coords = []
             
-            if wkt.startswith("POINT"):
-                geom_type = "Point"
-                # POINT(127.1 37.5)
-                content = wkt[6:-1]
-                coords = list(map(float, content.split()))
-            elif wkt.startswith("LINESTRING"):
-                geom_type = "LineString"
-                # LINESTRING(127.1 37.5, 127.2 37.6)
-                content = wkt[11:-1]
-                coords = [list(map(float, p.strip().split())) for p in content.split(',')]
+            # [수정] Supabase 반환값이 GeoJSON(dict)인 경우와 WKT(str)인 경우 모두 처리
+            if isinstance(geom_val, dict):
+                geom_type = geom_val.get('type')
+                coords = geom_val.get('coordinates')
+            elif isinstance(geom_val, str):
+                wkt = geom_val
+                if ';' in wkt: wkt = wkt.split(';')[1]
+                
+                if wkt.startswith("POINT"):
+                    geom_type = "Point"
+                    content = wkt[6:-1]
+                    coords = list(map(float, content.split()))
+                elif wkt.startswith("LINESTRING"):
+                    geom_type = "LineString"
+                    content = wkt[11:-1]
+                    coords = [list(map(float, p.strip().split())) for p in content.split(',')]
             
-            if geom_type:
+            if geom_type and geom_type in features_map:
                 props = {"handle": row['handle'], "layer": row['layer'], "text": row['text_content']}
                 feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
                 features_map[geom_type].append(feat)
