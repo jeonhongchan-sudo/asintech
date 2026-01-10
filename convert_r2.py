@@ -185,8 +185,13 @@ def json_to_supabase_and_geojson(project_id, source_crs):
 
     try:
         # 1. Load JSON
-        with open("input.json", "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
+        with open("input.json", "rb") as f:
+            raw_data = f.read()
+        try:
+            data = json.loads(raw_data.decode('utf-8-sig'))
+        except UnicodeDecodeError:
+            print("⚠️ UTF-8 decode failed, trying CP949...")
+            data = json.loads(raw_data.decode('cp949'))
         
         # 2. Prepare Data for Insert
         insert_rows = []
