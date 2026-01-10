@@ -360,7 +360,7 @@ def convert_to_pmtiles():
         "--force",
         "--no-line-simplification", # 라인 단순화 방지 (CAD 원본 형상 유지)
         "--no-tiny-polygon-reduction", # 아주 작은 폴리곤도 삭제하지 않고 유지
-        "-r1.3" # 점진적 삭제 비율 조정 (기본값 2.5와 1.0의 중간값)
+        "-r1.4" # 점진적 삭제 비율 조정 (기본값 2.5와 1.0의 중간값)
     ]
     
     has_input = False
