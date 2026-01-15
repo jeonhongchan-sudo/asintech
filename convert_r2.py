@@ -8,6 +8,12 @@ from botocore.client import Config
 import ezdxf
 from pyproj import Transformer
 try:
+    from shapely.geometry import Point, LineString, MultiLineString
+    from shapely.ops import linemerge
+except ImportError:
+    print("⚠️ Shapely library not found. Chainage calculation will be skipped.")
+    Point, LineString, MultiLineString, linemerge = None, None, None, None
+try:
     from supabase import create_client
     print("✅ Supabase library imported successfully.")
 except ImportError as e:
@@ -91,7 +97,7 @@ def download_json_from_r2(project_id):
         print(f"Error downloading JSON: {e}")
         return False
 
-def dxf_to_geojson(source_crs, target_layers):
+def dxf_to_geojson(source_crs, target_layers, centerline_layer=None, reverse_chainage=False):
     """DXF 파일을 GeoJSON으로 변환 (pyproj 좌표계 변환 및 레이어 필터링 적용)"""
     print(f"Converting DXF to GeoJSON (CRS: {source_crs})...")
     print(f"Target Layers: {target_layers}")
@@ -100,6 +106,37 @@ def dxf_to_geojson(source_crs, target_layers):
         transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
         doc = ezdxf.readfile("input.dxf")
         msp = doc.modelspace()
+        
+        # [추가] 도로중심선 지오메트리 추출 및 병합 (Shapely 사용)
+        centerline_geom = None
+        centerline_len = 0
+        if centerline_layer and LineString:
+            print(f"Processing Centerline Layer: {centerline_layer}")
+            lines = []
+            # 해당 레이어의 선형 객체만 추출
+            cl_entities = msp.query(f'*[layer=="{centerline_layer}"]')
+            for e in cl_entities:
+                try:
+                    if e.dxftype() in ['LINE', 'LWPOLYLINE', 'POLYLINE']:
+                        pts = list(e.points()) if e.dxftype() != 'LWPOLYLINE' else list(e.get_points('xy'))
+                        if len(pts) >= 2:
+                            # 2D 좌표만 사용
+                            lines.append(LineString([(p[0], p[1]) for p in pts]))
+                except: pass
+            
+            if lines:
+                try:
+                    merged = linemerge(lines)
+                    centerline_geom = merged
+                    centerline_len = merged.length
+                    print(f"Centerline constructed. Total Length: {centerline_len:.2f}")
+                except Exception as e:
+                    print(f"Centerline merge failed: {e}")
+        else:
+            if not centerline_layer:
+                print("ℹ️ No centerline layer provided. Chainage calculation skipped.")
+            elif not LineString:
+                print("⚠️ Centerline layer provided but Shapely library is missing. Chainage calculation skipped.")
         
         features_map = {'Point': [], 'LineString': []}
         stats = {'Point': 0, 'LineString': 0}
@@ -125,6 +162,35 @@ def dxf_to_geojson(source_crs, target_layers):
                 if e.dxf.hasattr('rotation'):
                     # DXF는 반시계(CCW), 웹(Mapbox/MapLibre)은 시계(CW) 방향이므로 부호 반전
                     props['rotation'] = -float(e.dxf.rotation)
+
+                # [추가] 원본 TM 좌표 및 체인리지 계산
+                tm_pt = None
+                if dxftype in ['TEXT', 'MTEXT', 'INSERT']:
+                    tm_pt = e.dxf.insert
+                elif dxftype == 'POINT':
+                    tm_pt = e.dxf.location
+                elif dxftype == 'CIRCLE':
+                    tm_pt = e.dxf.center
+                elif dxftype == 'LINE':
+                    tm_pt = e.dxf.start # 선은 시작점 기준
+                
+                if tm_pt:
+                    props['tm_x'] = round(tm_pt[0], 3)
+                    props['tm_y'] = round(tm_pt[1], 3)
+                    
+                    # 체인리지 계산 (Shapely Project)
+                    if centerline_geom:
+                        try:
+                            pt = Point(tm_pt[0], tm_pt[1])
+                            dist = centerline_geom.project(pt)
+                            if reverse_chainage:
+                                dist = centerline_len - dist
+                            
+                            # 체인리지 포맷 (예: 0+123.45)
+                            km = int(dist / 1000)
+                            m = dist % 1000
+                            props['chainage'] = f"{km}+{m:06.2f}"
+                        except: pass
 
                 if dxftype in ['TEXT', 'MTEXT']:
                     props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
@@ -360,7 +426,7 @@ def convert_to_pmtiles():
         "--force",
         "--no-line-simplification", # 라인 단순화 방지 (CAD 원본 형상 유지)
         "--no-tiny-polygon-reduction", # 아주 작은 폴리곤도 삭제하지 않고 유지
-        "-r1.4" # 점진적 삭제 비율 조정 (기본값 2.5와 1.0의 중간값)
+        "-r1.5" # 점진적 삭제 비율 조정 (기본값 2.5와 1.0의 중간값)
     ]
     
     has_input = False
@@ -450,6 +516,8 @@ if __name__ == "__main__":
         source_crs = payload.get('source_crs', 'EPSG:5187')
         layers = payload.get('layers', [])
         cache_control = payload.get('cache_control', 'no-cache')
+        centerline_layer = payload.get('centerline_layer')
+        reverse_chainage = payload.get('reverse_chainage', False)
         input_type = payload.get('input_type', 'dxf') # dxf or json
         
         print(f"Starting conversion for Project {project_id} (Type: {input_type})")
@@ -465,7 +533,7 @@ if __name__ == "__main__":
         else:
             # Default DXF workflow
             if download_dxf_from_r2(project_id):
-                if dxf_to_geojson(source_crs, layers):
+                if dxf_to_geojson(source_crs, layers, centerline_layer, reverse_chainage):
                     if convert_to_pmtiles():
                         if upload_to_r2(project_id, cache_control):
                             success = True
