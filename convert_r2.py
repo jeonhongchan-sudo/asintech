@@ -153,8 +153,14 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         # [Schema Load]
         schema = {}
         if os.path.exists("cad_schema.json"):
-            with open("cad_schema.json", "r", encoding="utf-8") as f:
-                schema = json.load(f).get("columns", {})
+            try:
+                with open("cad_schema.json", "r", encoding="utf-8") as f:
+                    schema = json.load(f).get("columns", {})
+                print("✅ Loaded schema from cad_schema.json")
+            except Exception as e:
+                print(f"❌ Failed to load cad_schema.json: {e}")
+        else:
+            print("⚠️ cad_schema.json not found. Proceeding without schema mapping.")
         
         # [추가] 도로중심선 지오메트리 추출 및 병합 (Shapely 사용)
         centerline_geom = None

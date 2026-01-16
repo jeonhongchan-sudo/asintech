@@ -1,0 +1,13 @@
+{
+  "columns": {
+    "handle": { "source": "dxf", "attr": "handle" },
+    "layer": { "source": "dxf", "attr": "layer" },
+    "block_name": { "source": "dxf", "attr": "block_name" },
+    "text_content": { "source": "dxf", "attr": "text" },
+    "x_coord": { "source": "dxf", "attr": "x" },
+    "y_coord": { "source": "dxf", "attr": "y" },
+    "rotation": { "source": "dxf", "attr": "rotation" },
+    "chainage": { "source": "calc", "method": "chainage" },
+    "geom": { "source": "calc", "method": "wkt" }
+  }
+}
