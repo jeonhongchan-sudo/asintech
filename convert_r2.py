@@ -153,14 +153,8 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         # [Schema Load]
         schema = {}
         if os.path.exists("cad_schema.json"):
-            try:
-                with open("cad_schema.json", "r", encoding="utf-8") as f:
-                    schema = json.load(f).get("columns", {})
-                print("✅ Loaded schema from cad_schema.json")
-            except Exception as e:
-                print(f"❌ Failed to load cad_schema.json: {e}")
-        else:
-            print("⚠️ cad_schema.json not found. Proceeding without schema mapping.")
+            with open("cad_schema.json", "r", encoding="utf-8") as f:
+                schema = json.load(f).get("columns", {})
         
         # [추가] 도로중심선 지오메트리 추출 및 병합 (Shapely 사용)
         centerline_geom = None
@@ -527,64 +521,68 @@ def convert_to_pmtiles():
         return False
 
 def upload_to_r2(project_id, cache_control):
-    """Cloudflare R2에 PMTiles 업로드"""
+    """Cloudflare R2에 PMTiles 및 JSON 업로드"""
     print("Uploading to R2...")
     
     s3 = get_r2_client()
-    
-    file_name = f"cad_data/cad_{project_id}_Data.pmtiles"
-    
-    try:
-        try: s3.delete_object(Bucket=R2_BUCKET_NAME, Key=file_name)
-        except: pass
+    supabase = get_supabase_client() # [수정] Supabase 클라이언트 가져오기
 
-        with open("output.pmtiles", "rb") as f:
-            s3.upload_fileobj(
-                f, 
-                R2_BUCKET_NAME, 
-                file_name,
-                ExtraArgs={'CacheControl': cache_control}
-            )
-        print(f"Upload success: {file_name}")
+    # [수정] 업로드할 파일과 메타데이터를 리스트로 관리
+    files_to_upload = []
+    
+    # 1. PMTiles 파일 정보
+    if os.path.exists("output.pmtiles"):
+        files_to_upload.append({
+            "local_path": "output.pmtiles",
+            "r2_key": f"cad_data/cad_{project_id}_Data.pmtiles",
+            "file_type": "pmtiles"
+        })
         
-        json_file = f"CAD_{project_id}.json"
-        if os.path.exists(json_file):
-            r2_key = f"cad_data/CAD_{project_id}.json"
-            print(f"Uploading DB JSON: {r2_key}...")
-            try:
-                with open(json_file, "rb") as f:
-                    s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key)
-                print("DB JSON Upload success.")
-            except Exception as e:
-                print(f"DB JSON Upload failed: {e}")
+    # 2. DB용 JSON 파일 정보
+    json_file_local = f"CAD_{project_id}.json"
+    if os.path.exists(json_file_local):
+        files_to_upload.append({
+            "local_path": json_file_local,
+            "r2_key": f"cad_data/CAD_{project_id}.json",
+            "file_type": "json"
+        })
 
-        # Supabase 메타데이터 업데이트
-        print("🔄 Updating Supabase metadata...")
-        supabase = get_supabase_client()
-        if supabase:
-            try:
-                size = os.path.getsize("output.pmtiles")
-                data = {
-                    "project_id": int(project_id),
-                    "file_type": "pmtiles",
-                    "file_path": file_name,
-                    "file_size": size,
-                    "updated_at": "now()"
-                }
-                res = supabase.table("cad_files").select("id").eq("file_path", file_name).execute()
-                if res.data:
-                    supabase.table("cad_files").update(data).eq("file_path", file_name).execute()
-                else:
-                    supabase.table("cad_files").insert(data).execute()
-                print("Supabase metadata updated.")
-            except Exception as e:
-                print(f"❌ Supabase update failed: {e}")
-        else:
-            print("⚠️ Supabase client is not available. Metadata update skipped.")
+    if not files_to_upload:
+        print("No files to upload.")
+        return False
 
+    try:
+        for file_info in files_to_upload:
+            local_path = file_info["local_path"]
+            r2_key = file_info["r2_key"]
+            file_type = file_info["file_type"]
+
+            print(f"Uploading {local_path} to {r2_key}...")
+
+            # 기존 파일 삭제 시도
+            try: s3.delete_object(Bucket=R2_BUCKET_NAME, Key=r2_key)
+            except: pass
+
+            # 파일 업로드
+            with open(local_path, "rb") as f:
+                s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key, ExtraArgs={'CacheControl': cache_control} if file_type == 'pmtiles' else {})
+            print(f"  -> Upload success: {r2_key}")
+
+            # Supabase 메타데이터 업데이트
+            if supabase:
+                print(f"  -> Updating Supabase metadata for {file_type}...")
+                try:
+                    size = os.path.getsize(local_path)
+                    data = {"project_id": int(project_id), "file_type": file_type, "file_path": r2_key, "file_size": size, "updated_at": "now()"}
+                    res = supabase.table("cad_files").select("id").eq("file_path", r2_key).execute()
+                    if res.data: supabase.table("cad_files").update(data).eq("file_path", r2_key).execute()
+                    else: supabase.table("cad_files").insert(data).execute()
+                    print("  -> Supabase metadata updated.")
+                except Exception as e: print(f"  -> ❌ Supabase update failed: {e}")
+            else: print("  -> ⚠️ Supabase client not available. Metadata update skipped.")
         return True
     except Exception as e:
-        print(f"Upload failed: {e}")
+        print(f"Upload process failed: {e}")
         return False
 
 if __name__ == "__main__":
