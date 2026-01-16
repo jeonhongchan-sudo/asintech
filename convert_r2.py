@@ -412,6 +412,7 @@ def json_to_supabase_and_geojson(project_id, source_crs):
                 "x_coord": tx if tx is not None else x,
                 "y_coord": ty if ty is not None else y,
                 "rotation": obj.get('rotation'),
+                "chainage": obj.get('chainage'),
                 "geom": final_wkt
             }
             insert_rows.append(row)
@@ -433,7 +434,7 @@ def json_to_supabase_and_geojson(project_id, source_crs):
         current = 0
         limit = 1000
         while True:
-            res = supabase.table("cad_objects").select("handle, layer, text_content, geom, rotation").eq("project_id", project_id).range(current*limit, (current+1)*limit-1).execute()
+            res = supabase.table("cad_objects").select("handle, layer, text_content, geom, rotation, chainage").eq("project_id", project_id).range(current*limit, (current+1)*limit-1).execute()
             if not res.data: break
             all_rows.extend(res.data)
             if len(res.data) < limit: break
@@ -468,6 +469,8 @@ def json_to_supabase_and_geojson(project_id, source_crs):
                 props = {"handle": row['handle'], "layer": row['layer'], "text": row['text_content']}
                 if row.get('rotation'):
                     props['rotation'] = -float(row['rotation'])
+                if row.get('chainage'):
+                    props['chainage'] = row['chainage']
                 
                 feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
                 features_map[geom_type].append(feat)
