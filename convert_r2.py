@@ -97,7 +97,50 @@ def download_json_from_r2(project_id):
         print(f"Error downloading JSON: {e}")
         return False
 
-def dxf_to_geojson(source_crs, target_layers, centerline_layer=None, reverse_chainage=False):
+def get_chainage_details(line_geom, pt_geom, total_length, reverse=False):
+    """체인리지, 방향, 오프셋 계산"""
+    try:
+        # 1. Station (시점으로부터의 거리)
+        dist = line_geom.project(pt_geom)
+        
+        # 2. Offset (중심선과의 수직 거리)
+        offset = line_geom.distance(pt_geom)
+        
+        # 3. 방향 (좌/우) 판별
+        # 투영점(중심선 상의 점) 구하기
+        proj_pt = line_geom.interpolate(dist)
+        
+        # 접선 벡터 구하기 (진행 방향)
+        delta = 0.1
+        if dist + delta <= total_length:
+            next_pt = line_geom.interpolate(dist + delta)
+            vec_line = (next_pt.x - proj_pt.x, next_pt.y - proj_pt.y)
+        else:
+            prev_pt = line_geom.interpolate(dist - delta)
+            vec_line = (proj_pt.x - prev_pt.x, proj_pt.y - prev_pt.y)
+            
+        # 투영점 -> 대상점 벡터
+        vec_pt = (pt_geom.x - proj_pt.x, pt_geom.y - proj_pt.y)
+        
+        # 외적 (Cross Product)으로 좌우 판별: x1*y2 - x2*y1
+        # 진행방향 기준: 양수=좌측, 음수=우측 (일반적인 좌표계)
+        cross_prod = vec_line[0] * vec_pt[1] - vec_line[1] * vec_pt[0]
+        direction_str = "중앙"
+        if cross_prod < 0: direction_str = "우"
+        elif cross_prod > 0: direction_str = "좌"
+        
+        # 역방향 처리 (거리는 반전하되, 상행 기준이므로 좌우/상행 표기는 유지)
+        final_dist = total_length - dist if reverse else dist
+        
+        km = int(final_dist / 1000)
+        m = final_dist % 1000
+        
+        # 요청 포맷: 0+100.76/상행(우)/3.1
+        return f"{km}+{m:06.2f}/상행({direction_str})/{offset:.1f}"
+    except:
+        return None
+
+def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline_layer=None, reverse_chainage=False):
     """DXF 파일을 GeoJSON으로 변환 (pyproj 좌표계 변환 및 레이어 필터링 적용)"""
     print(f"Converting DXF to GeoJSON (CRS: {source_crs})...")
     print(f"Target Layers: {target_layers}")
@@ -106,6 +149,12 @@ def dxf_to_geojson(source_crs, target_layers, centerline_layer=None, reverse_cha
         transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
         doc = ezdxf.readfile("input.dxf")
         msp = doc.modelspace()
+
+        # [Schema Load]
+        schema = {}
+        if os.path.exists("cad_schema.json"):
+            with open("cad_schema.json", "r", encoding="utf-8") as f:
+                schema = json.load(f).get("columns", {})
         
         # [추가] 도로중심선 지오메트리 추출 및 병합 (Shapely 사용)
         centerline_geom = None
@@ -140,6 +189,7 @@ def dxf_to_geojson(source_crs, target_layers, centerline_layer=None, reverse_cha
         
         features_map = {'Point': [], 'LineString': []}
         stats = {'Point': 0, 'LineString': 0}
+        db_json_list = [] # DB 업로드용 JSON 리스트
 
         def process_entity(e):
             try:
@@ -148,22 +198,24 @@ def dxf_to_geojson(source_crs, target_layers, centerline_layer=None, reverse_cha
 
                 dxftype = e.dxftype()
                 if dxftype == 'INSERT':
+                    # 블록 내부 형상은 분해하여 재귀 처리
                     for sub_e in e.virtual_entities(): process_entity(sub_e)
-                    return
 
-                if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE']: return
+                # 블록 자체를 포함하여 허용된 타입만 처리
+                if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE', 'INSERT']: return
 
                 geom_type = None
                 coords = []
                 props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype}
 
-                # [추가] 색상(ACI) 및 회전(Rotation) 정보 저장
+                # 색상(ACI) 및 회전(Rotation) 정보 저장
                 props['color'] = e.dxf.get('color', 256)  # 256: ByLayer
                 if e.dxf.hasattr('rotation'):
                     # DXF는 반시계(CCW), 웹(Mapbox/MapLibre)은 시계(CW) 방향이므로 부호 반전
                     props['rotation'] = -float(e.dxf.rotation)
 
-                # [추가] 원본 TM 좌표 및 체인리지 계산
+                chainage_val = None
+                # 원본 TM 좌표 및 체인리지 계산
                 tm_pt = None
                 if dxftype in ['TEXT', 'MTEXT', 'INSERT']:
                     tm_pt = e.dxf.insert
@@ -182,14 +234,10 @@ def dxf_to_geojson(source_crs, target_layers, centerline_layer=None, reverse_cha
                     if centerline_geom:
                         try:
                             pt = Point(tm_pt[0], tm_pt[1])
-                            dist = centerline_geom.project(pt)
-                            if reverse_chainage:
-                                dist = centerline_len - dist
-                            
-                            # 체인리지 포맷 (예: 0+123.45)
-                            km = int(dist / 1000)
-                            m = dist % 1000
-                            props['chainage'] = f"{km}+{m:06.2f}"
+                            c_info = get_chainage_details(centerline_geom, pt, centerline_len, reverse_chainage)
+                            if c_info:
+                                props['chainage'] = c_info
+                            chainage_val = props['chainage']
                         except: pass
 
                 if dxftype in ['TEXT', 'MTEXT']:
@@ -217,14 +265,12 @@ def dxf_to_geojson(source_crs, target_layers, centerline_layer=None, reverse_cha
                     p = e.dxf.center
                     coords = transformer.transform(p[0], p[1])
                     props['radius'] = e.dxf.radius
-                elif dxftype in ['TEXT', 'MTEXT', 'POINT']:
+                elif dxftype in ['TEXT', 'MTEXT', 'POINT', 'INSERT']:
                     geom_type = "Point"
-                    p = e.dxf.insert if dxftype in ['TEXT', 'MTEXT'] else e.dxf.location
+                    p = e.dxf.insert if dxftype in ['TEXT', 'MTEXT', 'INSERT'] else e.dxf.location
                     coords = transformer.transform(p[0], p[1])
                 elif dxftype in ['ARC', 'SPLINE', 'ELLIPSE']:
-                    # [추가] 곡선(Arc, Spline, Ellipse)을 LineString으로 변환 (DB 없이 처리)
                     try:
-                        # flattening(sagitta): 곡선을 직선으로 근사 (0.001 = 1mm 정밀도 유지)
                         points = list(e.flattening(0.001))
                         if len(points) >= 2:
                             coords = [transformer.transform(p[0], p[1]) for p in points]
@@ -235,6 +281,37 @@ def dxf_to_geojson(source_crs, target_layers, centerline_layer=None, reverse_cha
                     feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
                     features_map[geom_type].append(feat)
                     stats[geom_type] += 1
+
+                    # [DB JSON 생성] 스키마 기반 매핑
+                    if schema:
+                        db_item = {}
+                        dxf_attrs = {
+                            "handle": e.dxf.handle,
+                            "layer": e.dxf.layer,
+                            "block_name": e.dxf.name if dxftype == 'INSERT' else None,
+                            "text": props.get('text'),
+                            "x": props.get('tm_x'),
+                            "y": props.get('tm_y'),
+                            "rotation": props.get('rotation', 0)
+                        }
+                        
+                        for col, rule in schema.items():
+                            src = rule.get("source")
+                            if src == "dxf":
+                                db_item[col] = dxf_attrs.get(rule.get("attr"))
+                            elif src == "calc":
+                                method = rule.get("method")
+                                if method == "chainage":
+                                    db_item[col] = chainage_val
+                                elif method == "wkt":
+                                    if geom_type == "Point":
+                                        db_item[col] = f"SRID=4326;POINT({coords[0]} {coords[1]})"
+                                    elif geom_type == "LineString":
+                                        pairs = ", ".join([f"{c[0]} {c[1]}" for c in coords])
+                                        db_item[col] = f"SRID=4326;LINESTRING({pairs})"
+                        
+                        db_json_list.append(db_item)
+
             except: pass
         
         for e in msp: process_entity(e)
@@ -247,6 +324,11 @@ def dxf_to_geojson(source_crs, target_layers, centerline_layer=None, reverse_cha
             with open("temp_line.geojson", "w", encoding="utf-8") as f:
                 json.dump({"type": "FeatureCollection", "features": features_map['LineString']}, f, ensure_ascii=False)
 
+        # [DB용 JSON 저장]
+        if db_json_list:
+            with open(f"CAD_{project_id}.json", "w", encoding="utf-8") as f:
+                json.dump(db_json_list, f, ensure_ascii=False)
+
         return True
     except Exception as e:
         print(f"GeoJSON conversion error: {e}")
@@ -258,7 +340,6 @@ def json_to_supabase_and_geojson(project_id, source_crs):
     supabase = get_supabase_client()
     if not supabase: return False
 
-    # [추가] 좌표 변환기 초기화 (Source CRS -> WGS84)
     try:
         transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
     except Exception as e:
@@ -285,13 +366,11 @@ def json_to_supabase_and_geojson(project_id, source_crs):
             tx, ty = None, None
             final_wkt = None
             
-            # 1) X, Y 좌표 변환
             if x is not None and y is not None:
                 try:
                     tx, ty = transformer.transform(float(x), float(y))
                 except: pass
             
-            # 2) WKT 변환 (POINT, LINESTRING 지원)
             if wkt:
                 clean_wkt = wkt.split(';')[-1] if ';' in wkt else wkt
                 clean_wkt = clean_wkt.strip().upper()
@@ -318,7 +397,6 @@ def json_to_supabase_and_geojson(project_id, source_crs):
                             final_wkt = f"SRID=4326;LINESTRING({', '.join(new_pairs)})"
                 except: pass
             
-            # 3) 최종 WKT 결정 (변환된 좌표 우선)
             if not final_wkt:
                 if tx is not None and ty is not None:
                     final_wkt = f"SRID=4326;POINT({tx} {ty})"
@@ -348,11 +426,9 @@ def json_to_supabase_and_geojson(project_id, source_crs):
             batch = insert_rows[i:i+batch_size]
             supabase.table("cad_objects").insert(batch).execute()
         
-        # 4. Fetch Data as GeoJSON (Using Python conversion for simplicity and reliability)
-        # Supabase에서 데이터를 다시 조회하여 GeoJSON 생성 (PostGIS의 정확성 활용)
+        # 4. Fetch Data as GeoJSON
         print("Fetching data and generating GeoJSON...")
         
-        # 페이지네이션으로 전체 데이터 조회
         all_rows = []
         current = 0
         limit = 1000
@@ -365,10 +441,6 @@ def json_to_supabase_and_geojson(project_id, source_crs):
             
         features_map = {'Point': [], 'LineString': []}
         
-        # WKT 파싱을 위해 shapely 사용 (없으면 간단한 파싱)
-        # GitHub Action 환경에는 shapely가 없을 수 있으므로 ezdxf/pyproj 외존성만 사용하거나
-        # 여기서는 간단히 WKT 문자열 처리를 수행 (POINT, LINESTRING만 처리)
-        
         for row in all_rows:
             geom_val = row['geom']
             if not geom_val: continue
@@ -376,7 +448,6 @@ def json_to_supabase_and_geojson(project_id, source_crs):
             geom_type = None
             coords = []
             
-            # [수정] Supabase 반환값이 GeoJSON(dict)인 경우와 WKT(str)인 경우 모두 처리
             if isinstance(geom_val, dict):
                 geom_type = geom_val.get('type')
                 coords = geom_val.get('coordinates')
@@ -396,7 +467,7 @@ def json_to_supabase_and_geojson(project_id, source_crs):
             if geom_type and geom_type in features_map:
                 props = {"handle": row['handle'], "layer": row['layer'], "text": row['text_content']}
                 if row.get('rotation'):
-                    props['rotation'] = -float(row['rotation']) # Web용 회전 보정 (CCW -> CW)
+                    props['rotation'] = -float(row['rotation'])
                 
                 feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
                 features_map[geom_type].append(feat)
@@ -420,13 +491,13 @@ def convert_to_pmtiles():
     cmd = [
         "tippecanoe",
         "-o", "output.pmtiles",
-        "-z22", # Max zoom 22 (약 3cm 정밀도)
+        "-z22",
         "--drop-densest-as-needed",
         "--extend-zooms-if-still-dropping",
         "--force",
-        "--no-line-simplification", # 라인 단순화 방지 (CAD 원본 형상 유지)
-        "--no-tiny-polygon-reduction", # 아주 작은 폴리곤도 삭제하지 않고 유지
-        "-r1.5" # 점진적 삭제 비율 조정 (기본값 2.5와 1.0의 중간값)
+        "--no-line-simplification",
+        "--no-tiny-polygon-reduction",
+        "-r1.5"
     ]
     
     has_input = False
@@ -458,7 +529,6 @@ def upload_to_r2(project_id, cache_control):
     file_name = f"cad_data/cad_{project_id}_Data.pmtiles"
     
     try:
-        # 기존 파일 삭제 시도
         try: s3.delete_object(Bucket=R2_BUCKET_NAME, Key=file_name)
         except: pass
 
@@ -467,13 +537,21 @@ def upload_to_r2(project_id, cache_control):
                 f, 
                 R2_BUCKET_NAME, 
                 file_name,
-                ExtraArgs={
-                    # 'ContentType': 'application/vnd.pmtiles', # Colab과 동일하게 자동 설정(또는 없음)으로 변경
-                    'CacheControl': cache_control
-                }
+                ExtraArgs={'CacheControl': cache_control}
             )
         print(f"Upload success: {file_name}")
         
+        json_file = f"CAD_{project_id}.json"
+        if os.path.exists(json_file):
+            r2_key = f"cad_data/CAD_{project_id}.json"
+            print(f"Uploading DB JSON: {r2_key}...")
+            try:
+                with open(json_file, "rb") as f:
+                    s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key)
+                print("DB JSON Upload success.")
+            except Exception as e:
+                print(f"DB JSON Upload failed: {e}")
+
         # Supabase 메타데이터 업데이트
         print("🔄 Updating Supabase metadata...")
         supabase = get_supabase_client()
@@ -487,7 +565,6 @@ def upload_to_r2(project_id, cache_control):
                     "file_size": size,
                     "updated_at": "now()"
                 }
-                # Upsert logic
                 res = supabase.table("cad_files").select("id").eq("file_path", file_name).execute()
                 if res.data:
                     supabase.table("cad_files").update(data).eq("file_path", file_name).execute()
@@ -505,7 +582,6 @@ def upload_to_r2(project_id, cache_control):
         return False
 
 if __name__ == "__main__":
-    # 커맨드라인 인자로 JSON 페이로드 받기
     if len(sys.argv) < 2:
         print("Usage: python convert_r2.py <json_payload>")
         sys.exit(1)
@@ -518,7 +594,7 @@ if __name__ == "__main__":
         cache_control = payload.get('cache_control', 'no-cache')
         centerline_layer = payload.get('centerline_layer')
         reverse_chainage = payload.get('reverse_chainage', False)
-        input_type = payload.get('input_type', 'dxf') # dxf or json
+        input_type = payload.get('input_type', 'dxf')
         
         print(f"Starting conversion for Project {project_id} (Type: {input_type})")
         
@@ -531,9 +607,8 @@ if __name__ == "__main__":
                         if upload_to_r2(project_id, cache_control):
                             success = True
         else:
-            # Default DXF workflow
             if download_dxf_from_r2(project_id):
-                if dxf_to_geojson(source_crs, layers, centerline_layer, reverse_chainage):
+                if dxf_to_geojson_and_db_json(project_id, source_crs, layers, centerline_layer, reverse_chainage):
                     if convert_to_pmtiles():
                         if upload_to_r2(project_id, cache_control):
                             success = True
