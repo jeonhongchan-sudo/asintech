@@ -4,3 +4,4 @@ ezdxf
 shapely
 pyproj
 supabase
+matplotlib

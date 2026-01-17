@@ -15,6 +15,11 @@ except ImportError:
     print("⚠️ Shapely library not found. Chainage calculation will be skipped.")
     Point, LineString, MultiLineString, linemerge = None, None, None, None
 try:
+    import matplotlib
+except ImportError:
+    print("⚠️ Matplotlib library not found. Text to Polyline conversion (Text_to_Pline) might fail or be inaccurate.")
+    matplotlib = None
+try:
     from supabase import create_client
     print("✅ Supabase library imported successfully.")
 except ImportError as e:
@@ -203,19 +208,29 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 dxftype = e.dxftype()
                 
                 # [특수 레이어 처리] Text_to_Pline
+                # 이 레이어는 시각적 표현(Polyline)만 하고 DB/Chainage에서는 제외
                 is_special_layer = (e.dxf.layer == "Text_to_Pline")
-                # 시각적 용도로만 사용 (DB 제외, Chainage 제외) 여부 결정
                 current_visual_only = visual_only or (has_text_to_pline and is_special_layer)
 
                 # 1. Text_to_Pline 레이어(또는 하위)의 Text/MText/Circle -> Polyline 변환
                 #    (일반적으로 Point로 변환되는 객체들을 강제로 선형으로 변환하여 시각화)
                 if current_visual_only and dxftype in ['TEXT', 'MTEXT', 'CIRCLE']:
                     try:
-                        # Text를 Path로 변환 (ezdxf 기능)
+                        # 객체를 Path로 변환 (ezdxf 기능)
                         p = ezdxf_path.make_path(e)
+                        
+                        # [수정] 해상도 개선: 텍스트 크기에 비례한 허용오차 설정
+                        tolerance = 0.01
+                        if dxftype in ['TEXT', 'MTEXT']:
+                            # 텍스트 높이 가져오기 (기본값 1.0)
+                            height = e.dxf.get('char_height', 1.0) if dxftype == 'MTEXT' else e.dxf.get('height', 1.0)
+                            if height > 0:
+                                tolerance = height / 50.0  # 높이의 2% 정도로 설정 (부드러운 곡선 유지)
+
+                        converted_count = 0
                         # Path를 LineString 좌표로 변환 (Flattening)
                         for sub_path in p.sub_paths():
-                            vertices = list(sub_path.flattening(distance=0.05))
+                            vertices = list(sub_path.flattening(distance=tolerance))
                             if len(vertices) < 2: continue
                             
                             coords = [transformer.transform(v.x, v.y) for v in vertices]
@@ -227,13 +242,17 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                             feat = {"type": "Feature", "geometry": {"type": "LineString", "coordinates": coords}, "properties": props}
                             features_map['LineString'].append(feat)
                             stats['LineString'] += 1
+                            converted_count += 1
+                        
+                        if converted_count == 0:
+                            print(f"⚠️ Text_to_Pline: No geometry generated for {dxftype} (Handle: {e.dxf.handle}). Font might be missing.")
                     except Exception as ex:
                         print(f"⚠️ Geometry to Polyline conversion failed for {e.dxf.handle}: {ex}")
-                    return # 일반 텍스트 처리는 건너뜀
+                    return # 변환된 객체는 여기서 처리를 마침 (기존 로직 건너뜀)
 
                 if dxftype == 'INSERT':
                     # 블록 내부 형상은 분해하여 재귀 처리
-                    # visual_only 속성을 하위 엔티티에 전달
+                    # visual_only 속성을 하위 엔티티에 전달 (Text_to_Pline 블록이면 하위도 모두 visual_only)
                     for sub_e in e.virtual_entities(): process_entity(sub_e, visual_only=current_visual_only)
 
                     # 만약 visual_only(예: Text_to_Pline 블록)라면 INSERT 포인트 자체는 처리하지 않음
