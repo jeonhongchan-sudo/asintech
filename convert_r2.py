@@ -6,6 +6,7 @@ import boto3
 import requests
 from botocore.client import Config
 import ezdxf
+from ezdxf import path as ezdxf_path
 from pyproj import Transformer
 try:
     from shapely.geometry import Point, LineString, MultiLineString
@@ -150,6 +151,9 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         doc = ezdxf.readfile("input.dxf")
         msp = doc.modelspace()
 
+        # [설정] 특수 처리 레이어 존재 여부 확인
+        has_text_to_pline = "Text_to_Pline" in doc.layers
+
         # [Schema Load]
         schema = {}
         if os.path.exists("cad_schema.json"):
@@ -191,16 +195,50 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         stats = {'Point': 0, 'LineString': 0}
         db_json_list = [] # DB 업로드용 JSON 리스트
 
-        def process_entity(e):
+        def process_entity(e, visual_only=False):
             try:
                 # [수정] target_layers가 비어있으면 모든 레이어 처리
                 if target_layers and e.dxf.layer not in target_layers: return
 
                 dxftype = e.dxftype()
+                
+                # [특수 레이어 처리] Text_to_Pline
+                is_special_layer = (e.dxf.layer == "Text_to_Pline")
+                # 시각적 용도로만 사용 (DB 제외, Chainage 제외) 여부 결정
+                current_visual_only = visual_only or (has_text_to_pline and is_special_layer)
+
+                # 1. Text_to_Pline 레이어(또는 하위)의 Text/MText/Circle -> Polyline 변환
+                #    (일반적으로 Point로 변환되는 객체들을 강제로 선형으로 변환하여 시각화)
+                if current_visual_only and dxftype in ['TEXT', 'MTEXT', 'CIRCLE']:
+                    try:
+                        # Text를 Path로 변환 (ezdxf 기능)
+                        p = ezdxf_path.make_path(e)
+                        # Path를 LineString 좌표로 변환 (Flattening)
+                        for sub_path in p.sub_paths():
+                            vertices = list(sub_path.flattening(distance=0.05))
+                            if len(vertices) < 2: continue
+                            
+                            coords = [transformer.transform(v.x, v.y) for v in vertices]
+                            
+                            # LineString Feature 생성 (DB에는 넣지 않음)
+                            props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype + "_AS_PLINE"}
+                            props['color'] = e.dxf.get('color', 256)
+                            
+                            feat = {"type": "Feature", "geometry": {"type": "LineString", "coordinates": coords}, "properties": props}
+                            features_map['LineString'].append(feat)
+                            stats['LineString'] += 1
+                    except Exception as ex:
+                        print(f"⚠️ Geometry to Polyline conversion failed for {e.dxf.handle}: {ex}")
+                    return # 일반 텍스트 처리는 건너뜀
+
                 if dxftype == 'INSERT':
                     # 블록 내부 형상은 분해하여 재귀 처리
-                    for sub_e in e.virtual_entities(): process_entity(sub_e)
+                    # visual_only 속성을 하위 엔티티에 전달
+                    for sub_e in e.virtual_entities(): process_entity(sub_e, visual_only=current_visual_only)
 
+                    # 만약 visual_only(예: Text_to_Pline 블록)라면 INSERT 포인트 자체는 처리하지 않음
+                    if current_visual_only: return
+                
                 # 블록 자체를 포함하여 허용된 타입만 처리
                 if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE', 'INSERT']: return
 
@@ -231,7 +269,7 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     props['tm_y'] = round(tm_pt[1], 3)
                     
                     # 체인리지 계산 (Shapely Project)
-                    if centerline_geom:
+                    if centerline_geom and not current_visual_only:
                         try:
                             pt = Point(tm_pt[0], tm_pt[1])
                             c_info = get_chainage_details(centerline_geom, pt, centerline_len, reverse_chainage)
@@ -283,7 +321,7 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     stats[geom_type] += 1
 
                     # [DB JSON 생성] 스키마 기반 매핑
-                    if schema:
+                    if schema and not current_visual_only:
                         db_item = {}
                         dxf_attrs = {
                             "handle": e.dxf.handle,
