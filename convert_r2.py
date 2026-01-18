@@ -156,9 +156,6 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         doc = ezdxf.readfile("input.dxf")
         msp = doc.modelspace()
 
-        # [설정] 특수 처리 레이어 존재 여부 확인
-        has_text_to_pline = "Text_to_Pline" in doc.layers
-
         # [Schema Load]
         schema = {}
         if os.path.exists("cad_schema.json"):
@@ -202,15 +199,19 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
 
         def process_entity(e, visual_only=False):
             try:
-                # [수정] target_layers가 비어있으면 모든 레이어 처리
-                if target_layers and e.dxf.layer not in target_layers: return
-
                 dxftype = e.dxftype()
                 
                 # [특수 레이어 처리] Text_to_Pline
                 # 이 레이어는 시각적 표현(Polyline)만 하고 DB/Chainage에서는 제외
-                is_special_layer = (e.dxf.layer == "Text_to_Pline")
-                current_visual_only = visual_only or (has_text_to_pline and is_special_layer)
+                is_special_layer = (e.dxf.layer.lower() == "text_to_pline")
+                
+                # [수정] 필터링 로직 개선: 특수 레이어거나 visual_only 모드이면 target_layers 필터 무시
+                # (사용자가 target_layers에 Text_to_Pline을 포함하지 않아도 변환되도록 보장)
+                if target_layers:
+                    if not (visual_only or is_special_layer or e.dxf.layer in target_layers):
+                        return
+
+                current_visual_only = visual_only or is_special_layer
 
                 # 1. Text_to_Pline 레이어(또는 하위)의 Text/MText/Circle -> Polyline 변환
                 #    (일반적으로 Point로 변환되는 객체들을 강제로 선형으로 변환하여 시각화)
