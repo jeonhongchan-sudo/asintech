@@ -214,90 +214,9 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
 
                 current_visual_only = visual_only or is_special_layer
 
-                # 1. Text_to_Pline 레이어(또는 하위)의 Text/MText/Circle -> Polyline 변환
-                #    (일반적으로 Point로 변환되는 객체들을 강제로 선형으로 변환하여 시각화)
-                if current_visual_only and dxftype in ['TEXT', 'MTEXT', 'CIRCLE']:
-                    try:
-                        # [Helper] Path -> GeoJSON Feature 변환 함수 (재사용을 위해 내부 함수로 정의)
-                        def path_to_features(path_obj, entity, tol):
-                            c = 0
-                            for sub_path in path_obj.sub_paths():
-                                vertices = list(sub_path.flattening(distance=tol))
-                                if len(vertices) < 2: continue
-                                coords = [transformer.transform(v.x, v.y) for v in vertices]
-                                props = {"handle": entity.dxf.handle, "layer": entity.dxf.layer, "dxftype": entity.dxftype() + "_AS_PLINE"}
-                                props['color'] = entity.dxf.get('color', 256)
-                                feat = {"type": "Feature", "geometry": {"type": "LineString", "coordinates": coords}, "properties": props}
-                                features_map['LineString'].append(feat)
-                                stats['LineString'] += 1
-                                c += 1
-                            return c
-                        
-                        # [설정] 해상도 (Tolerance)
-                        tolerance = 0.01
-                        if dxftype in ['TEXT', 'MTEXT']:
-                            height = e.dxf.get('char_height', 1.0) if dxftype == 'MTEXT' else e.dxf.get('height', 1.0)
-                            if height > 0: tolerance = height / 50.0
-
-                        # 1차 시도: 원본 스타일로 변환
-                        p = ezdxf_path.make_path(e)
-                        converted_count = path_to_features(p, e, tolerance)
-                        
-                        # [Retry] 변환 실패 시(폰트 문제 등), 기본 폰트(DejaVuSans)로 재시도
-                        if converted_count == 0 and dxftype in ['TEXT', 'MTEXT']:
-                            fallback_style = "EZDXF_FALLBACK"
-                            if fallback_style not in doc.styles:
-                                try:
-                                    s = doc.styles.new(fallback_style)
-                                    s.dxf.font = "DejaVuSans.ttf" # Matplotlib 기본 폰트
-                                except: pass
-                            
-                            # 스타일 변경 후 재시도
-                            e.dxf.style = fallback_style
-                            try:
-                                p_retry = ezdxf_path.make_path(e)
-                                converted_count = path_to_features(p_retry, e, tolerance)
-                                if converted_count > 0:
-                                    print(f"  -> Recovered {e.dxf.handle} using default font.")
-                            except: pass
-                        
-                        if converted_count == 0:
-                            print(f"⚠️ Text_to_Pline: No geometry generated for {dxftype} (Handle: {e.dxf.handle}). Font might be missing.")
-                            
-                            # [추가] 폰트 문제로 변환 실패 시, 텍스트 영역을 사각형(LineString)으로 대체 표시
-                            # 이렇게 해야 결과물이 비어있지 않게 되어 PMTiles 생성 및 404 에러 방지 가능
-                            if dxftype in ['TEXT', 'MTEXT']:
-                                insert = e.dxf.insert
-                                height = e.dxf.get('char_height', 1.0) if dxftype == 'MTEXT' else e.dxf.get('height', 1.0)
-                                text_val = e.dxf.text if dxftype == 'TEXT' else e.text
-                                # 대략적인 폭 추정 (글자수 * 높이 * 비율)
-                                width_est = len(text_val) * height * 0.8 if text_val else height
-                                
-                                # [수정] 회전 각도 반영하여 사각형 박스 생성
-                                rotation = e.dxf.get('rotation', 0.0)
-                                rad = math.radians(rotation)
-                                cos_r = math.cos(rad)
-                                sin_r = math.sin(rad)
-                                
-                                # 로컬 박스 좌표 (0,0 기준) -> 회전 -> 월드 좌표 이동
-                                local_pts = [(0, 0), (width_est, 0), (width_est, height), (0, height), (0, 0)]
-                                world_pts = []
-                                for lx, ly in local_pts:
-                                    rx = lx * cos_r - ly * sin_r
-                                    ry = lx * sin_r + ly * cos_r
-                                    world_pts.append((insert[0] + rx, insert[1] + ry))
-                                
-                                box_coords = [transformer.transform(x, y) for x, y in world_pts]
-                                
-                                props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype + "_BOX_FALLBACK"}
-                                props['color'] = e.dxf.get('color', 256)
-                                feat = {"type": "Feature", "geometry": {"type": "LineString", "coordinates": box_coords}, "properties": props}
-                                features_map['LineString'].append(feat)
-                                stats['LineString'] += 1
-                                print(f"  -> Created fallback bounding box for {e.dxf.handle}")
-                    except Exception as ex:
-                        print(f"⚠️ Geometry to Polyline conversion failed for {e.dxf.handle}: {ex}")
-                    return # 변환된 객체는 여기서 처리를 마침 (기존 로직 건너뜀)
+                # [전략 변경] Text_to_Pline 레이어도 일반 Text(Point)로 처리
+                # - Polyline 변환 로직 제거 (폰트 문제 및 복잡성 회피)
+                # - 대신 DB 저장 및 Chainage 계산은 제외 (current_visual_only 플래그 활용)
 
                 if dxftype == 'INSERT':
                     # 블록 내부 형상은 분해하여 재귀 처리
@@ -313,6 +232,10 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 geom_type = None
                 coords = []
                 props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype}
+
+                # [추가] 시각화 전용 객체 식별자 (웹에서 마커 제외 등에 활용)
+                if current_visual_only:
+                    props['is_visual_only'] = True
 
                 # 색상(ACI) 및 회전(Rotation) 정보 저장
                 props['color'] = e.dxf.get('color', 256)  # 256: ByLayer
@@ -348,6 +271,8 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
 
                 if dxftype in ['TEXT', 'MTEXT']:
                     props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
+                    # [추가] 텍스트 높이 정보 (시각화 크기 제어용)
+                    props['height'] = e.dxf.get('char_height', 1.0) if dxftype == 'MTEXT' else e.dxf.get('height', 1.0)
 
                 # Geometry Conversion
                 if dxftype == 'LINE':
