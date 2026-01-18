@@ -525,13 +525,13 @@ def convert_to_pmtiles():
     cmd = [
         "tippecanoe",
         "-o", "output.pmtiles",
-        "-z23",
+        "-z22",
         "--drop-densest-as-needed",
         "--extend-zooms-if-still-dropping",
         "--force",
         "--no-line-simplification",
         "--no-tiny-polygon-reduction",
-        "-r1.4"
+        "-r1.3"
     ]
     
     has_input = False
