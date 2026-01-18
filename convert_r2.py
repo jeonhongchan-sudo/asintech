@@ -1,4 +1,5 @@
 import os
+import math
 import sys
 import json
 import subprocess
@@ -217,36 +218,83 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 #    (일반적으로 Point로 변환되는 객체들을 강제로 선형으로 변환하여 시각화)
                 if current_visual_only and dxftype in ['TEXT', 'MTEXT', 'CIRCLE']:
                     try:
-                        # 객체를 Path로 변환 (ezdxf 기능)
-                        p = ezdxf_path.make_path(e)
+                        # [Helper] Path -> GeoJSON Feature 변환 함수 (재사용을 위해 내부 함수로 정의)
+                        def path_to_features(path_obj, entity, tol):
+                            c = 0
+                            for sub_path in path_obj.sub_paths():
+                                vertices = list(sub_path.flattening(distance=tol))
+                                if len(vertices) < 2: continue
+                                coords = [transformer.transform(v.x, v.y) for v in vertices]
+                                props = {"handle": entity.dxf.handle, "layer": entity.dxf.layer, "dxftype": entity.dxftype() + "_AS_PLINE"}
+                                props['color'] = entity.dxf.get('color', 256)
+                                feat = {"type": "Feature", "geometry": {"type": "LineString", "coordinates": coords}, "properties": props}
+                                features_map['LineString'].append(feat)
+                                stats['LineString'] += 1
+                                c += 1
+                            return c
                         
-                        # [수정] 해상도 개선: 텍스트 크기에 비례한 허용오차 설정
+                        # [설정] 해상도 (Tolerance)
                         tolerance = 0.01
                         if dxftype in ['TEXT', 'MTEXT']:
-                            # 텍스트 높이 가져오기 (기본값 1.0)
                             height = e.dxf.get('char_height', 1.0) if dxftype == 'MTEXT' else e.dxf.get('height', 1.0)
-                            if height > 0:
-                                tolerance = height / 50.0  # 높이의 2% 정도로 설정 (부드러운 곡선 유지)
+                            if height > 0: tolerance = height / 50.0
 
-                        converted_count = 0
-                        # Path를 LineString 좌표로 변환 (Flattening)
-                        for sub_path in p.sub_paths():
-                            vertices = list(sub_path.flattening(distance=tolerance))
-                            if len(vertices) < 2: continue
+                        # 1차 시도: 원본 스타일로 변환
+                        p = ezdxf_path.make_path(e)
+                        converted_count = path_to_features(p, e, tolerance)
+                        
+                        # [Retry] 변환 실패 시(폰트 문제 등), 기본 폰트(DejaVuSans)로 재시도
+                        if converted_count == 0 and dxftype in ['TEXT', 'MTEXT']:
+                            fallback_style = "EZDXF_FALLBACK"
+                            if fallback_style not in doc.styles:
+                                try:
+                                    s = doc.styles.new(fallback_style)
+                                    s.dxf.font = "DejaVuSans.ttf" # Matplotlib 기본 폰트
+                                except: pass
                             
-                            coords = [transformer.transform(v.x, v.y) for v in vertices]
-                            
-                            # LineString Feature 생성 (DB에는 넣지 않음)
-                            props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype + "_AS_PLINE"}
-                            props['color'] = e.dxf.get('color', 256)
-                            
-                            feat = {"type": "Feature", "geometry": {"type": "LineString", "coordinates": coords}, "properties": props}
-                            features_map['LineString'].append(feat)
-                            stats['LineString'] += 1
-                            converted_count += 1
+                            # 스타일 변경 후 재시도
+                            e.dxf.style = fallback_style
+                            try:
+                                p_retry = ezdxf_path.make_path(e)
+                                converted_count = path_to_features(p_retry, e, tolerance)
+                                if converted_count > 0:
+                                    print(f"  -> Recovered {e.dxf.handle} using default font.")
+                            except: pass
                         
                         if converted_count == 0:
                             print(f"⚠️ Text_to_Pline: No geometry generated for {dxftype} (Handle: {e.dxf.handle}). Font might be missing.")
+                            
+                            # [추가] 폰트 문제로 변환 실패 시, 텍스트 영역을 사각형(LineString)으로 대체 표시
+                            # 이렇게 해야 결과물이 비어있지 않게 되어 PMTiles 생성 및 404 에러 방지 가능
+                            if dxftype in ['TEXT', 'MTEXT']:
+                                insert = e.dxf.insert
+                                height = e.dxf.get('char_height', 1.0) if dxftype == 'MTEXT' else e.dxf.get('height', 1.0)
+                                text_val = e.dxf.text if dxftype == 'TEXT' else e.text
+                                # 대략적인 폭 추정 (글자수 * 높이 * 비율)
+                                width_est = len(text_val) * height * 0.8 if text_val else height
+                                
+                                # [수정] 회전 각도 반영하여 사각형 박스 생성
+                                rotation = e.dxf.get('rotation', 0.0)
+                                rad = math.radians(rotation)
+                                cos_r = math.cos(rad)
+                                sin_r = math.sin(rad)
+                                
+                                # 로컬 박스 좌표 (0,0 기준) -> 회전 -> 월드 좌표 이동
+                                local_pts = [(0, 0), (width_est, 0), (width_est, height), (0, height), (0, 0)]
+                                world_pts = []
+                                for lx, ly in local_pts:
+                                    rx = lx * cos_r - ly * sin_r
+                                    ry = lx * sin_r + ly * cos_r
+                                    world_pts.append((insert[0] + rx, insert[1] + ry))
+                                
+                                box_coords = [transformer.transform(x, y) for x, y in world_pts]
+                                
+                                props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype + "_BOX_FALLBACK"}
+                                props['color'] = e.dxf.get('color', 256)
+                                feat = {"type": "Feature", "geometry": {"type": "LineString", "coordinates": box_coords}, "properties": props}
+                                features_map['LineString'].append(feat)
+                                stats['LineString'] += 1
+                                print(f"  -> Created fallback bounding box for {e.dxf.handle}")
                     except Exception as ex:
                         print(f"⚠️ Geometry to Polyline conversion failed for {e.dxf.handle}: {ex}")
                     return # 변환된 객체는 여기서 처리를 마침 (기존 로직 건너뜀)
