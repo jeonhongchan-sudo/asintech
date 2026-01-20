@@ -12,19 +12,32 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
 
-    - name: Install Tippecanoe
+    - name: Cache Tippecanoe
+      id: cache-tippecanoe
+      uses: actions/cache@v3
+      with:
+        path: tippecanoe
+        key: ${{ runner.os }}-tippecanoe-v1
+
+    - name: Build Tippecanoe
+      if: steps.cache-tippecanoe.outputs.cache-hit != 'true'
       run: |
         sudo apt-get update
         sudo apt-get install -y make g++ libsqlite3-dev zlib1g-dev
         git clone https://github.com/felt/tippecanoe.git
         cd tippecanoe
         make -j
+
+    - name: Install Tippecanoe
+      run: |
+        cd tippecanoe
         sudo make install
 
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
+        cache: 'pip'
 
     - name: Install dependencies
       run: |
