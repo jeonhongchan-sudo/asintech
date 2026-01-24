@@ -293,9 +293,11 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 # INSERT(블록) -> Explode (재귀)
                 if dxftype == 'INSERT':
                     for sub_e in e.virtual_entities(): process_for_viz(sub_e)
-                    return # 블록 자체는 그리지 않음
+                    # [수정] Text_to_Pline 레이어는 단순 그림이므로 Point 생성 건너뜀
+                    if is_special: return
+                    # 그 외 블록은 아래 로직을 통해 Point 생성 (속성 포함)
 
-                if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE']: return
+                if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE', 'INSERT']: return
 
                 geom_type = None
                 coords = []
@@ -305,10 +307,30 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 props['color'] = e.dxf.get('color', 256)
                 if e.dxf.hasattr('rotation'):
                     props['rotation'] = -float(e.dxf.rotation)
+                else:
+                    props['rotation'] = 0
                 
                 if dxftype in ['TEXT', 'MTEXT']:
                     props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
                     props['height'] = e.dxf.get('char_height', 1.0) if dxftype == 'MTEXT' else e.dxf.get('height', 1.0)
+
+                # [추가] 원본 좌표 및 체인리지 정보 속성 추가 (시각화용)
+                tm_pt = None
+                if dxftype in ['TEXT', 'MTEXT', 'INSERT']: tm_pt = e.dxf.insert
+                elif dxftype == 'POINT': tm_pt = e.dxf.location
+                elif dxftype == 'CIRCLE': tm_pt = e.dxf.center
+                elif dxftype == 'LINE': tm_pt = e.dxf.start
+
+                if tm_pt:
+                    props['tm_x'] = round(tm_pt[0], 3)
+                    props['tm_y'] = round(tm_pt[1], 3)
+                    
+                    if centerline_geom:
+                        try:
+                            pt = Point(tm_pt[0], tm_pt[1])
+                            c_info = get_chainage_details(centerline_geom, pt, centerline_len, reverse_chainage)
+                            if c_info: props['chainage'] = c_info
+                        except: pass
 
                 # Geometry Conversion (기존 로직 활용)
                 if dxftype == 'LINE':
@@ -332,9 +354,9 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     p = e.dxf.center
                     coords = transformer.transform(p[0], p[1])
                     props['radius'] = e.dxf.radius
-                elif dxftype in ['TEXT', 'MTEXT', 'POINT']:
+                elif dxftype in ['TEXT', 'MTEXT', 'POINT', 'INSERT']:
                     geom_type = "Point"
-                    p = e.dxf.insert if dxftype in ['TEXT', 'MTEXT'] else e.dxf.location
+                    p = e.dxf.insert if dxftype in ['TEXT', 'MTEXT', 'INSERT'] else e.dxf.location
                     coords = transformer.transform(p[0], p[1])
                 elif dxftype in ['ARC', 'SPLINE', 'ELLIPSE']:
                     try:
