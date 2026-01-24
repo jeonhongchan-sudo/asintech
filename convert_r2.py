@@ -229,6 +229,8 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
 
                 # 좌표 및 체인리지 계산을 위한 기준점 (TM)
                 tm_pt = None
+                wkt_geom = None
+
                 if dxftype in ['TEXT', 'MTEXT', 'INSERT']:
                     tm_pt = e.dxf.insert
                 elif dxftype == 'POINT':
@@ -237,6 +239,29 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     tm_pt = e.dxf.center
                 elif dxftype == 'LINE':
                     tm_pt = e.dxf.start # 선은 시작점 기준
+                    # LineString WKT 생성
+                    p_s, p_e = e.dxf.start, e.dxf.end
+                    t_s = transformer.transform(p_s[0], p_s[1])
+                    t_e = transformer.transform(p_e[0], p_e[1])
+                    wkt_geom = f"SRID=4326;LINESTRING({t_s[0]} {t_s[1]}, {t_e[0]} {t_e[1]})"
+                elif dxftype == 'LWPOLYLINE':
+                    points = list(e.get_points('xy'))
+                    if points:
+                        tm_pt = points[0]
+                        if len(points) >= 2:
+                            t_pts = [transformer.transform(p[0], p[1]) for p in points]
+                            if e.closed and t_pts[0] != t_pts[-1]: t_pts.append(t_pts[0])
+                            coord_str = ", ".join([f"{p[0]} {p[1]}" for p in t_pts])
+                            wkt_geom = f"SRID=4326;LINESTRING({coord_str})"
+                elif dxftype == 'POLYLINE':
+                    points = list(e.points())
+                    if points:
+                        tm_pt = points[0]
+                        if len(points) >= 2:
+                            t_pts = [transformer.transform(p[0], p[1]) for p in points]
+                            if e.is_closed and t_pts[0] != t_pts[-1]: t_pts.append(t_pts[0])
+                            coord_str = ", ".join([f"{p[0]} {p[1]}" for p in t_pts])
+                            wkt_geom = f"SRID=4326;LINESTRING({coord_str})"
                 
                 chainage_val = None
                 if tm_pt:
@@ -244,7 +269,7 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     props['tm_y'] = round(tm_pt[1], 3)
                     
                     # 체인리지 계산 (Shapely Project)
-                    if centerline_geom:
+                    if centerline_geom and dxftype not in ['LINE', 'LWPOLYLINE', 'POLYLINE']:
                         try:
                             pt = Point(tm_pt[0], tm_pt[1])
                             c_info = get_chainage_details(centerline_geom, pt, centerline_len, reverse_chainage)
@@ -273,8 +298,10 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                             if method == "chainage":
                                 db_item[col] = chainage_val
                             elif method == "wkt":
-                                # DB에는 WKT 저장 (INSERT는 점으로)
-                                if tm_pt:
+                                # DB에는 WKT 저장 (Line/Poly는 LineString, 나머지는 Point)
+                                if wkt_geom:
+                                    db_item[col] = wkt_geom
+                                elif tm_pt:
                                     lon, lat = transformer.transform(tm_pt[0], tm_pt[1])
                                     db_item[col] = f"SRID=4326;POINT({lon} {lat})"
                     
