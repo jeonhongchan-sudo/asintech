@@ -144,8 +144,8 @@ def get_chainage_details(line_geom, pt_geom, total_length, reverse=False):
         km = int(final_dist / 1000)
         m = final_dist % 1000
         
-        # 요청 포맷: 0+100.76/상행(우)/3.1
-        return f"{km}+{m:06.2f}/상행({direction_str})/{offset:.1f}"
+        # 요청 포맷: 0+100.760/상행(우)/3.1 (소수점 3자리)
+        return f"{km}+{m:07.3f}/상행({direction_str})/{offset:.1f}"
     except:
         return None
 
