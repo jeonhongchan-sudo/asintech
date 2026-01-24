@@ -1,5 +1,4 @@
 import os
-import math
 import sys
 import json
 import subprocess
@@ -7,7 +6,6 @@ import boto3
 import requests
 from botocore.client import Config
 import ezdxf
-from ezdxf import path as ezdxf_path
 from pyproj import Transformer
 try:
     from shapely.geometry import Point, LineString, MultiLineString
@@ -15,11 +13,6 @@ try:
 except ImportError:
     print("⚠️ Shapely library not found. Chainage calculation will be skipped.")
     Point, LineString, MultiLineString, linemerge = None, None, None, None
-try:
-    import matplotlib
-except ImportError:
-    print("⚠️ Matplotlib library not found. Text to Polyline conversion (Text_to_Pline) might fail or be inaccurate.")
-    matplotlib = None
 try:
     from supabase import create_client
     print("✅ Supabase library imported successfully.")
@@ -198,44 +191,18 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         stats = {'Point': 0, 'LineString': 0}
         db_json_list = [] # DB 업로드용 JSON 리스트
 
-        def process_entity(e, visual_only=False):
+        # [수정] DB용 처리 함수: 블록을 분해하지 않고 단일 객체(Point)로 저장
+        def process_for_db(e):
             try:
+                # [수정] target_layers가 비어있으면 모든 레이어 처리
+                if target_layers and e.dxf.layer not in target_layers: return
+
                 dxftype = e.dxftype()
-                
-                # [특수 레이어 처리] Text_to_Pline
-                # 이 레이어는 시각적 표현(Polyline)만 하고 DB/Chainage에서는 제외
-                is_special_layer = (e.dxf.layer.lower() == "text_to_pline")
-                
-                # [수정] 필터링 로직 개선: 특수 레이어거나 visual_only 모드이면 target_layers 필터 무시
-                # (사용자가 target_layers에 Text_to_Pline을 포함하지 않아도 변환되도록 보장)
-                if target_layers:
-                    if not (visual_only or is_special_layer or e.dxf.layer in target_layers):
-                        return
-
-                current_visual_only = visual_only or is_special_layer
-
-                # [전략 변경] Text_to_Pline 레이어도 일반 Text(Point)로 처리
-                # - Polyline 변환 로직 제거 (폰트 문제 및 복잡성 회피)
-                # - 대신 DB 저장 및 Chainage 계산은 제외 (current_visual_only 플래그 활용)
-
-                if dxftype == 'INSERT':
-                    # 블록 내부 형상은 분해하여 재귀 처리
-                    # visual_only 속성을 하위 엔티티에 전달 (Text_to_Pline 블록이면 하위도 모두 visual_only)
-                    for sub_e in e.virtual_entities(): process_entity(sub_e, visual_only=current_visual_only)
-
-                    # 만약 visual_only(예: Text_to_Pline 블록)라면 INSERT 포인트 자체는 처리하지 않음
-                    if current_visual_only: return
-                
-                # 블록 자체를 포함하여 허용된 타입만 처리
                 if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE', 'INSERT']: return
 
                 geom_type = None
                 coords = []
                 props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype}
-
-                # [추가] 시각화 전용 객체 식별자 (웹에서 마커 제외 등에 활용)
-                if current_visual_only:
-                    props['is_visual_only'] = True
 
                 # 색상(ACI) 및 회전(Rotation) 정보 저장
                 props['color'] = e.dxf.get('color', 256)  # 256: ByLayer
@@ -260,7 +227,7 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     props['tm_y'] = round(tm_pt[1], 3)
                     
                     # 체인리지 계산 (Shapely Project)
-                    if centerline_geom and not current_visual_only:
+                    if centerline_geom:
                         try:
                             pt = Point(tm_pt[0], tm_pt[1])
                             c_info = get_chainage_details(centerline_geom, pt, centerline_len, reverse_chainage)
@@ -271,8 +238,59 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
 
                 if dxftype in ['TEXT', 'MTEXT']:
                     props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
-                    # [추가] 텍스트 높이 정보 (시각화 크기 제어용)
-                    props['height'] = e.dxf.get('char_height', 1.0) if dxftype == 'MTEXT' else e.dxf.get('height', 1.0)
+
+                # [DB JSON 생성] 스키마 매핑
+                if schema:
+                    db_item = {}
+                    dxf_attrs = {
+                        "handle": e.dxf.handle,
+                        "layer": e.dxf.layer,
+                        "block_name": e.dxf.name if dxftype == 'INSERT' else None,
+                        "text": props.get('text'),
+                        "x": props.get('tm_x'),
+                        "y": props.get('tm_y'),
+                        "rotation": props.get('rotation', 0)
+                    }
+                    
+                    for col, rule in schema.items():
+                        src = rule.get("source")
+                        if src == "dxf":
+                            db_item[col] = dxf_attrs.get(rule.get("attr"))
+                        elif src == "calc":
+                            method = rule.get("method")
+                            if method == "chainage":
+                                db_item[col] = chainage_val
+                            elif method == "wkt":
+                                # DB에는 WKT(Geometry)를 저장하되, INSERT는 점으로 저장
+                                # (사용자가 '점으로도 표현할 필요없음'이라고 했으나, DB 공간 쿼리를 위해 최소한의 위치는 저장하는 것이 안전함)
+                                if tm_pt:
+                                    # 좌표 변환
+                                    lon, lat = transformer.transform(tm_pt[0], tm_pt[1])
+                                    db_item[col] = f"SRID=4326;POINT({lon} {lat})"
+                    
+                    db_json_list.append(db_item)
+            except: pass
+
+        # [수정] 시각화(PMTiles)용 처리 함수 (블록 분해 O)
+        def process_for_viz(e):
+            try:
+                if target_layers and e.dxf.layer not in target_layers: return
+                dxftype = e.dxftype()
+
+                # [중요] 블록(INSERT) 처리
+                if dxftype == 'INSERT':
+                    # 1. 내부 형상은 분해하여 재귀 처리 (그림 그리기)
+                    for sub_e in e.virtual_entities(): process_for_viz(sub_e)
+                    
+                    # 2. 'Text_to_Pline' 레이어는 단순 그림이므로 Point 생성 건너뜀
+                    if e.dxf.layer == "Text_to_Pline": return
+                    # 3. 그 외 블록은 아래 로직을 통해 Point(클릭용) 생성
+
+                if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE']: return
+
+                geom_type = None
+                coords = []
+                props = {"handle": e.dxf.handle, "layer": e.dxf.layer} # 최소 속성만
 
                 # Geometry Conversion
                 if dxftype == 'LINE':
@@ -312,40 +330,13 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
                     features_map[geom_type].append(feat)
                     stats[geom_type] += 1
-
-                    # [DB JSON 생성] 스키마 기반 매핑
-                    if schema and not current_visual_only:
-                        db_item = {}
-                        dxf_attrs = {
-                            "handle": e.dxf.handle,
-                            "layer": e.dxf.layer,
-                            "block_name": e.dxf.name if dxftype == 'INSERT' else None,
-                            "text": props.get('text'),
-                            "x": props.get('tm_x'),
-                            "y": props.get('tm_y'),
-                            "rotation": props.get('rotation', 0)
-                        }
-                        
-                        for col, rule in schema.items():
-                            src = rule.get("source")
-                            if src == "dxf":
-                                db_item[col] = dxf_attrs.get(rule.get("attr"))
-                            elif src == "calc":
-                                method = rule.get("method")
-                                if method == "chainage":
-                                    db_item[col] = chainage_val
-                                elif method == "wkt":
-                                    if geom_type == "Point":
-                                        db_item[col] = f"SRID=4326;POINT({coords[0]} {coords[1]})"
-                                    elif geom_type == "LineString":
-                                        pairs = ", ".join([f"{c[0]} {c[1]}" for c in coords])
-                                        db_item[col] = f"SRID=4326;LINESTRING({pairs})"
-                        
-                        db_json_list.append(db_item)
-
             except: pass
         
-        for e in msp: process_entity(e)
+        # [수정] 메인 루프: DB용과 시각화용을 분리하여 처리
+        for e in msp:
+            process_for_db(e)   # DB: 블록 분해 안 함 (1개 row)
+            process_for_viz(e)  # Viz: 블록 분해 함 (다수 feature)
+            
         print(f"Conversion Stats: {stats}")
 
         if features_map['Point']:
@@ -531,7 +522,7 @@ def convert_to_pmtiles():
         "--force",
         "--no-line-simplification",
         "--no-tiny-polygon-reduction",
-        "-r1.3"
+        "-r1.5"
     ]
     
     has_input = False
