@@ -3,6 +3,8 @@ import math
 import sys
 import json
 import subprocess
+import re
+from datetime import datetime, timedelta, timezone
 import boto3
 import requests
 from botocore.client import Config
@@ -198,53 +200,34 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         stats = {'Point': 0, 'LineString': 0}
         db_json_list = [] # DB 업로드용 JSON 리스트
 
-        def process_entity(e, visual_only=False):
+        # [1] DB JSON 변환 함수 (Explode 없음)
+        def process_for_db(e):
             try:
+                # Layer Filter (DB용은 엄격하게 적용)
+                if target_layers and e.dxf.layer not in target_layers: return
+                
+                # Text_to_Pline 레이어는 시각화 전용이므로 DB에서 제외
+                if e.dxf.layer.lower() == "text_to_pline": return
+
                 dxftype = e.dxftype()
                 
-                # [특수 레이어 처리] Text_to_Pline
-                # 이 레이어는 시각적 표현(Polyline)만 하고 DB/Chainage에서는 제외
-                is_special_layer = (e.dxf.layer.lower() == "text_to_pline")
-                
-                # [수정] 필터링 로직 개선: 특수 레이어거나 visual_only 모드이면 target_layers 필터 무시
-                # (사용자가 target_layers에 Text_to_Pline을 포함하지 않아도 변환되도록 보장)
-                if target_layers:
-                    if not (visual_only or is_special_layer or e.dxf.layer in target_layers):
-                        return
-
-                current_visual_only = visual_only or is_special_layer
-
-                # [전략 변경] Text_to_Pline 레이어도 일반 Text(Point)로 처리
-                # - Polyline 변환 로직 제거 (폰트 문제 및 복잡성 회피)
-                # - 대신 DB 저장 및 Chainage 계산은 제외 (current_visual_only 플래그 활용)
-
-                if dxftype == 'INSERT':
-                    # 블록 내부 형상은 분해하여 재귀 처리
-                    # visual_only 속성을 하위 엔티티에 전달 (Text_to_Pline 블록이면 하위도 모두 visual_only)
-                    for sub_e in e.virtual_entities(): process_entity(sub_e, visual_only=current_visual_only)
-
-                    # 만약 visual_only(예: Text_to_Pline 블록)라면 INSERT 포인트 자체는 처리하지 않음
-                    if current_visual_only: return
-                
-                # 블록 자체를 포함하여 허용된 타입만 처리
+                # 허용된 타입 (INSERT 포함, 분해하지 않음)
                 if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE', 'INSERT']: return
 
-                geom_type = None
-                coords = []
-                props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype}
-
-                # [추가] 시각화 전용 객체 식별자 (웹에서 마커 제외 등에 활용)
-                if current_visual_only:
-                    props['is_visual_only'] = True
-
-                # 색상(ACI) 및 회전(Rotation) 정보 저장
-                props['color'] = e.dxf.get('color', 256)  # 256: ByLayer
+                # 기본 속성 추출
+                props = {}
+                
+                # 회전각 (Web은 CW, DXF는 CCW -> 부호 반전)
                 if e.dxf.hasattr('rotation'):
-                    # DXF는 반시계(CCW), 웹(Mapbox/MapLibre)은 시계(CW) 방향이므로 부호 반전
                     props['rotation'] = -float(e.dxf.rotation)
+                else:
+                    props['rotation'] = 0
 
-                chainage_val = None
-                # 원본 TM 좌표 및 체인리지 계산
+                # 텍스트 내용
+                if dxftype in ['TEXT', 'MTEXT']:
+                    props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
+
+                # 좌표 및 체인리지 계산을 위한 기준점 (TM)
                 tm_pt = None
                 if dxftype in ['TEXT', 'MTEXT', 'INSERT']:
                     tm_pt = e.dxf.insert
@@ -255,26 +238,79 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 elif dxftype == 'LINE':
                     tm_pt = e.dxf.start # 선은 시작점 기준
                 
+                chainage_val = None
                 if tm_pt:
                     props['tm_x'] = round(tm_pt[0], 3)
                     props['tm_y'] = round(tm_pt[1], 3)
                     
                     # 체인리지 계산 (Shapely Project)
-                    if centerline_geom and not current_visual_only:
+                    if centerline_geom:
                         try:
                             pt = Point(tm_pt[0], tm_pt[1])
                             c_info = get_chainage_details(centerline_geom, pt, centerline_len, reverse_chainage)
-                            if c_info:
-                                props['chainage'] = c_info
-                            chainage_val = props['chainage']
+                            if c_info: chainage_val = c_info
                         except: pass
 
+                # DB JSON 생성 (Schema 기반)
+                if schema:
+                    db_item = {}
+                    dxf_attrs = {
+                        "handle": e.dxf.handle,
+                        "layer": e.dxf.layer,
+                        "block_name": e.dxf.name if dxftype == 'INSERT' else None,
+                        "text": props.get('text'),
+                        "x": props.get('tm_x'),
+                        "y": props.get('tm_y'),
+                        "rotation": props.get('rotation', 0)
+                    }
+                    
+                    for col, rule in schema.items():
+                        src = rule.get("source")
+                        if src == "dxf":
+                            db_item[col] = dxf_attrs.get(rule.get("attr"))
+                        elif src == "calc":
+                            method = rule.get("method")
+                            if method == "chainage":
+                                db_item[col] = chainage_val
+                            elif method == "wkt":
+                                # DB에는 WKT 저장 (INSERT는 점으로)
+                                if tm_pt:
+                                    lon, lat = transformer.transform(tm_pt[0], tm_pt[1])
+                                    db_item[col] = f"SRID=4326;POINT({lon} {lat})"
+                    
+                    db_json_list.append(db_item)
+            except: pass
+
+        # [2] 시각화(PMTiles) 변환 함수 (Explode 포함)
+        def process_for_viz(e):
+            try:
+                # Layer Filter (Text_to_Pline 허용)
+                is_special = (e.dxf.layer.lower() == "text_to_pline")
+                if target_layers and not is_special and e.dxf.layer not in target_layers: return
+
+                dxftype = e.dxftype()
+
+                # INSERT(블록) -> Explode (재귀)
+                if dxftype == 'INSERT':
+                    for sub_e in e.virtual_entities(): process_for_viz(sub_e)
+                    return # 블록 자체는 그리지 않음
+
+                if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE']: return
+
+                geom_type = None
+                coords = []
+                props = {"handle": e.dxf.handle, "layer": e.dxf.layer}
+
+                # 시각화용 속성
+                props['color'] = e.dxf.get('color', 256)
+                if e.dxf.hasattr('rotation'):
+                    props['rotation'] = -float(e.dxf.rotation)
+                
                 if dxftype in ['TEXT', 'MTEXT']:
                     props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
-                    # [추가] 텍스트 높이 정보 (시각화 크기 제어용)
                     props['height'] = e.dxf.get('char_height', 1.0) if dxftype == 'MTEXT' else e.dxf.get('height', 1.0)
 
-                # Geometry Conversion
+                # Geometry Conversion (기존 로직 활용)
                 if dxftype == 'LINE':
                     geom_type = "LineString"
                     p_s, p_e = e.dxf.start, e.dxf.end
@@ -296,9 +332,9 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     p = e.dxf.center
                     coords = transformer.transform(p[0], p[1])
                     props['radius'] = e.dxf.radius
-                elif dxftype in ['TEXT', 'MTEXT', 'POINT', 'INSERT']:
+                elif dxftype in ['TEXT', 'MTEXT', 'POINT']:
                     geom_type = "Point"
-                    p = e.dxf.insert if dxftype in ['TEXT', 'MTEXT', 'INSERT'] else e.dxf.location
+                    p = e.dxf.insert if dxftype in ['TEXT', 'MTEXT'] else e.dxf.location
                     coords = transformer.transform(p[0], p[1])
                 elif dxftype in ['ARC', 'SPLINE', 'ELLIPSE']:
                     try:
@@ -312,40 +348,16 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
                     features_map[geom_type].append(feat)
                     stats[geom_type] += 1
-
-                    # [DB JSON 생성] 스키마 기반 매핑
-                    if schema and not current_visual_only:
-                        db_item = {}
-                        dxf_attrs = {
-                            "handle": e.dxf.handle,
-                            "layer": e.dxf.layer,
-                            "block_name": e.dxf.name if dxftype == 'INSERT' else None,
-                            "text": props.get('text'),
-                            "x": props.get('tm_x'),
-                            "y": props.get('tm_y'),
-                            "rotation": props.get('rotation', 0)
-                        }
-                        
-                        for col, rule in schema.items():
-                            src = rule.get("source")
-                            if src == "dxf":
-                                db_item[col] = dxf_attrs.get(rule.get("attr"))
-                            elif src == "calc":
-                                method = rule.get("method")
-                                if method == "chainage":
-                                    db_item[col] = chainage_val
-                                elif method == "wkt":
-                                    if geom_type == "Point":
-                                        db_item[col] = f"SRID=4326;POINT({coords[0]} {coords[1]})"
-                                    elif geom_type == "LineString":
-                                        pairs = ", ".join([f"{c[0]} {c[1]}" for c in coords])
-                                        db_item[col] = f"SRID=4326;LINESTRING({pairs})"
-                        
-                        db_json_list.append(db_item)
-
             except: pass
         
-        for e in msp: process_entity(e)
+        # [실행] 1단계: DB JSON 생성 (Explode 없음)
+        print("Phase 1: Generating DB JSON (No Explode)...")
+        for e in msp: process_for_db(e)
+        
+        # [실행] 2단계: 시각화 데이터 생성 (Explode 포함)
+        print("Phase 2: Generating Visualization Data (Explode)...")
+        for e in msp: process_for_viz(e)
+        
         print(f"Conversion Stats: {stats}")
 
         if features_map['Point']:
@@ -561,6 +573,15 @@ def upload_to_r2(project_id, cache_control):
     s3 = get_r2_client()
     supabase = get_supabase_client() # [수정] Supabase 클라이언트 가져오기
 
+    # [추가] 캐시 만료 시간 계산 (DB 기록용)
+    expiry_iso = None
+    if cache_control and "max-age=" in cache_control:
+        try:
+            seconds = int(re.search(r'max-age=(\d+)', cache_control).group(1))
+            expiry_dt = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            expiry_iso = expiry_dt.isoformat()
+        except: pass
+
     # [수정] 업로드할 파일과 메타데이터를 리스트로 관리
     files_to_upload = []
     
@@ -599,7 +620,16 @@ def upload_to_r2(project_id, cache_control):
 
             # 파일 업로드
             with open(local_path, "rb") as f:
-                s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key, ExtraArgs={'CacheControl': cache_control} if file_type == 'pmtiles' else {})
+                extra_args = {}
+                if cache_control:
+                    extra_args['CacheControl'] = cache_control
+                
+                if file_type == 'pmtiles':
+                    extra_args['ContentType'] = 'application/vnd.pmtiles'
+                elif file_type == 'json':
+                    extra_args['ContentType'] = 'application/json'
+                
+                s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key, ExtraArgs=extra_args)
             print(f"  -> Upload success: {r2_key}")
 
             # Supabase 메타데이터 업데이트
@@ -608,6 +638,9 @@ def upload_to_r2(project_id, cache_control):
                 try:
                     size = os.path.getsize(local_path)
                     data = {"project_id": int(project_id), "file_type": file_type, "file_path": r2_key, "file_size": size, "updated_at": "now()"}
+                    if expiry_iso:
+                        data["cache_expiry"] = expiry_iso
+                    
                     res = supabase.table("cad_files").select("id").eq("file_path", r2_key).execute()
                     if res.data: supabase.table("cad_files").update(data).eq("file_path", r2_key).execute()
                     else: supabase.table("cad_files").insert(data).execute()
