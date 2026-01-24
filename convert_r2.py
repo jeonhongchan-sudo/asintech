@@ -6,6 +6,8 @@ import boto3
 import requests
 from botocore.client import Config
 import ezdxf
+import re
+from datetime import datetime, timedelta, timezone
 from pyproj import Transformer
 try:
     from shapely.geometry import Point, LineString, MultiLineString
@@ -292,6 +294,13 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 coords = []
                 props = {"handle": e.dxf.handle, "layer": e.dxf.layer} # 최소 속성만
 
+                # [추가] 시각화를 위한 텍스트 내용 및 회전각 속성 추가
+                if dxftype in ['TEXT', 'MTEXT']:
+                    props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
+                    if e.dxf.hasattr('rotation'):
+                        # DXF(CCW) -> Web(CW) 부호 반전
+                        props['rotation'] = -float(e.dxf.rotation)
+
                 # Geometry Conversion
                 if dxftype == 'LINE':
                     geom_type = "LineString"
@@ -552,6 +561,15 @@ def upload_to_r2(project_id, cache_control):
     s3 = get_r2_client()
     supabase = get_supabase_client() # [수정] Supabase 클라이언트 가져오기
 
+    # [추가] 캐시 만료 시간 계산 (DB 기록용)
+    expiry_iso = None
+    if cache_control and "max-age=" in cache_control:
+        try:
+            seconds = int(re.search(r'max-age=(\d+)', cache_control).group(1))
+            expiry_dt = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            expiry_iso = expiry_dt.isoformat()
+        except: pass
+
     # [수정] 업로드할 파일과 메타데이터를 리스트로 관리
     files_to_upload = []
     
@@ -590,7 +608,19 @@ def upload_to_r2(project_id, cache_control):
 
             # 파일 업로드
             with open(local_path, "rb") as f:
-                s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key, ExtraArgs={'CacheControl': cache_control} if file_type == 'pmtiles' else {})
+                # [수정] 파일 타입에 상관없이 캐시 설정 적용 (JSON 포함)
+                extra_args = {}
+                if cache_control:
+                    extra_args['CacheControl'] = cache_control
+                
+                if file_type == 'json':
+                    extra_args['ContentType'] = 'application/json'
+                elif file_type == 'pmtiles':
+                    # [추가] PMTiles Content-Type 명시
+                    extra_args['ContentType'] = 'application/vnd.pmtiles'
+                
+                print(f"  -> Uploading with args: {extra_args}")
+                s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key, ExtraArgs=extra_args)
             print(f"  -> Upload success: {r2_key}")
 
             # Supabase 메타데이터 업데이트
@@ -599,6 +629,10 @@ def upload_to_r2(project_id, cache_control):
                 try:
                     size = os.path.getsize(local_path)
                     data = {"project_id": int(project_id), "file_type": file_type, "file_path": r2_key, "file_size": size, "updated_at": "now()"}
+                    # [추가] 만료 시간 DB 업데이트
+                    if expiry_iso:
+                        data["cache_expiry"] = expiry_iso
+                    
                     res = supabase.table("cad_files").select("id").eq("file_path", r2_key).execute()
                     if res.data: supabase.table("cad_files").update(data).eq("file_path", r2_key).execute()
                     else: supabase.table("cad_files").insert(data).execute()
