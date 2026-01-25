@@ -156,6 +156,7 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
     
     try:
         transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
+        srid_code = source_crs.split(':')[1] if ':' in source_crs else source_crs
         doc = ezdxf.readfile("input.dxf")
         msp = doc.modelspace()
 
@@ -241,27 +242,25 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     tm_pt = e.dxf.start # 선은 시작점 기준
                     # LineString WKT 생성
                     p_s, p_e = e.dxf.start, e.dxf.end
-                    t_s = transformer.transform(p_s[0], p_s[1])
-                    t_e = transformer.transform(p_e[0], p_e[1])
-                    wkt_geom = f"SRID=4326;LINESTRING({t_s[0]} {t_s[1]}, {t_e[0]} {t_e[1]})"
+                    wkt_geom = f"SRID={srid_code};LINESTRING({p_s[0]} {p_s[1]}, {p_e[0]} {p_e[1]})"
                 elif dxftype == 'LWPOLYLINE':
                     points = list(e.get_points('xy'))
                     if points:
                         tm_pt = points[0]
                         if len(points) >= 2:
-                            t_pts = [transformer.transform(p[0], p[1]) for p in points]
+                            t_pts = points
                             if e.closed and t_pts[0] != t_pts[-1]: t_pts.append(t_pts[0])
                             coord_str = ", ".join([f"{p[0]} {p[1]}" for p in t_pts])
-                            wkt_geom = f"SRID=4326;LINESTRING({coord_str})"
+                            wkt_geom = f"SRID={srid_code};LINESTRING({coord_str})"
                 elif dxftype == 'POLYLINE':
                     points = list(e.points())
                     if points:
                         tm_pt = points[0]
                         if len(points) >= 2:
-                            t_pts = [transformer.transform(p[0], p[1]) for p in points]
+                            t_pts = points
                             if e.is_closed and t_pts[0] != t_pts[-1]: t_pts.append(t_pts[0])
                             coord_str = ", ".join([f"{p[0]} {p[1]}" for p in t_pts])
-                            wkt_geom = f"SRID=4326;LINESTRING({coord_str})"
+                            wkt_geom = f"SRID={srid_code};LINESTRING({coord_str})"
                 
                 chainage_val = None
                 if tm_pt:
@@ -302,8 +301,7 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                                 if wkt_geom:
                                     db_item[col] = wkt_geom
                                 elif tm_pt:
-                                    lon, lat = transformer.transform(tm_pt[0], tm_pt[1])
-                                    db_item[col] = f"SRID=4326;POINT({lon} {lat})"
+                                    db_item[col] = f"SRID={srid_code};POINT({tm_pt[0]} {tm_pt[1]})"
                     
                     db_json_list.append(db_item)
             except: pass
@@ -434,6 +432,7 @@ def json_to_supabase_and_geojson(project_id, source_crs):
 
     try:
         transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
+        srid_code = source_crs.split(':')[1] if ':' in source_crs else source_crs
     except Exception as e:
         print(f"❌ Invalid CRS {source_crs}: {e}")
         return False
@@ -454,46 +453,19 @@ def json_to_supabase_and_geojson(project_id, source_crs):
             x = obj.get('x')
             y = obj.get('y')
             wkt = obj.get('wkt')
-            
-            tx, ty = None, None
+
             final_wkt = None
-            
-            if x is not None and y is not None:
-                try:
-                    tx, ty = transformer.transform(float(x), float(y))
-                except: pass
             
             if wkt:
                 clean_wkt = wkt.split(';')[-1] if ';' in wkt else wkt
                 clean_wkt = clean_wkt.strip().upper()
-                try:
-                    if clean_wkt.startswith("POINT"):
-                        content = clean_wkt[clean_wkt.find("(")+1 : clean_wkt.find(")")]
-                        parts = content.split()
-                        if len(parts) >= 2:
-                            px, py = float(parts[0]), float(parts[1])
-                            tpx, tpy = transformer.transform(px, py)
-                            final_wkt = f"SRID=4326;POINT({tpx} {tpy})"
-                            if tx is None: tx, ty = tpx, tpy
-                    elif clean_wkt.startswith("LINESTRING"):
-                        content = clean_wkt[clean_wkt.find("(")+1 : clean_wkt.find(")")]
-                        pairs = content.split(',')
-                        new_pairs = []
-                        for pair in pairs:
-                            parts = pair.strip().split()
-                            if len(parts) >= 2:
-                                px, py = float(parts[0]), float(parts[1])
-                                tpx, tpy = transformer.transform(px, py)
-                                new_pairs.append(f"{tpx} {tpy}")
-                        if new_pairs:
-                            final_wkt = f"SRID=4326;LINESTRING({', '.join(new_pairs)})"
-                except: pass
+                final_wkt = f"SRID={srid_code};{clean_wkt}"
             
             if not final_wkt:
-                if tx is not None and ty is not None:
-                    final_wkt = f"SRID=4326;POINT({tx} {ty})"
+                if x is not None and y is not None:
+                    final_wkt = f"SRID={srid_code};POINT({x} {y})"
                 elif wkt:
-                    final_wkt = f"SRID=4326;{clean_wkt}"
+                    final_wkt = f"SRID={srid_code};{clean_wkt}"
             
             row = {
                 "project_id": int(project_id),
@@ -501,8 +473,8 @@ def json_to_supabase_and_geojson(project_id, source_crs):
                 "layer": obj.get('layer'),
                 "block_name": obj.get('block_name'),
                 "text_content": obj.get('text'),
-                "x_coord": tx if tx is not None else x,
-                "y_coord": ty if ty is not None else y,
+                "x_coord": x,
+                "y_coord": y,
                 "rotation": obj.get('rotation'),
                 "chainage": obj.get('chainage'),
                 "geom": final_wkt
@@ -556,6 +528,19 @@ def json_to_supabase_and_geojson(project_id, source_crs):
                     geom_type = "LineString"
                     content = wkt[11:-1]
                     coords = [list(map(float, p.strip().split())) for p in content.split(',')]
+            
+            if coords:
+                try:
+                    if geom_type == "Point":
+                        tx, ty = transformer.transform(coords[0], coords[1])
+                        coords = [tx, ty]
+                    elif geom_type == "LineString":
+                        new_coords = []
+                        for p in coords:
+                            tx, ty = transformer.transform(p[0], p[1])
+                            new_coords.append([tx, ty])
+                        coords = new_coords
+                except: pass
             
             if geom_type and geom_type in features_map:
                 props = {"handle": row['handle'], "layer": row['layer'], "text": row['text_content']}
