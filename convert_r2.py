@@ -157,6 +157,7 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
     try:
         transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
         srid_code = source_crs.split(':')[1] if ':' in source_crs else source_crs
+        print(f"ℹ️ DB JSON will preserve original coordinates with SRID={srid_code}")
         doc = ezdxf.readfile("input.dxf")
         msp = doc.modelspace()
 
