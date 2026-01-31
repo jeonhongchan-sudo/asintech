@@ -530,9 +530,11 @@ def convert_to_pmtiles():
         print(f"Conversion failed: {e}")
         return False
 
-def upload_to_r2(project_id, cache_control):
+def upload_to_r2(project_id, cache_control, output_formats=None):
     """Cloudflare R2에 PMTiles 및 JSON 업로드"""
     print("Uploading to R2...")
+    
+    if output_formats is None: output_formats = ['pmtiles', 'json']
     
     s3 = get_r2_client()
     supabase = get_supabase_client() # [수정] Supabase 클라이언트 가져오기
@@ -541,7 +543,7 @@ def upload_to_r2(project_id, cache_control):
     files_to_upload = []
     
     # 1. PMTiles 파일 정보
-    if os.path.exists("output.pmtiles"):
+    if 'pmtiles' in output_formats and os.path.exists("output.pmtiles"):
         files_to_upload.append({
             "local_path": "output.pmtiles",
             "r2_key": f"cad_data/cad_{project_id}_Data.pmtiles",
@@ -550,7 +552,7 @@ def upload_to_r2(project_id, cache_control):
         
     # 2. DB용 JSON 파일 정보
     json_file_local = f"CAD_{project_id}.json"
-    if os.path.exists(json_file_local):
+    if 'json' in output_formats and os.path.exists(json_file_local):
         files_to_upload.append({
             "local_path": json_file_local,
             "r2_key": f"cad_data/CAD_{project_id}.json",
@@ -575,7 +577,8 @@ def upload_to_r2(project_id, cache_control):
 
             # 파일 업로드
             with open(local_path, "rb") as f:
-                s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key, ExtraArgs={'CacheControl': cache_control} if file_type == 'pmtiles' else {})
+                # [수정] 모든 파일에 캐시 설정 적용 (기존에는 PMTiles만 적용되었음)
+                s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key, ExtraArgs={'CacheControl': cache_control})
             print(f"  -> Upload success: {r2_key}")
 
             # Supabase 메타데이터 업데이트
@@ -624,7 +627,7 @@ if __name__ == "__main__":
                         pmtiles_success = convert_to_pmtiles()
                     
                     if pmtiles_success:
-                        if upload_to_r2(project_id, cache_control):
+                        if upload_to_r2(project_id, cache_control, output_formats):
                             success = True
         else:
             if download_dxf_from_r2(project_id):
@@ -635,7 +638,7 @@ if __name__ == "__main__":
                         pmtiles_success = convert_to_pmtiles()
                     
                     if pmtiles_success:
-                        if upload_to_r2(project_id, cache_control):
+                        if upload_to_r2(project_id, cache_control, output_formats):
                             success = True
 
         if success:
