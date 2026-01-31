@@ -618,13 +618,23 @@ if __name__ == "__main__":
         if input_type == 'json':
             if download_json_from_r2(project_id):
                 if json_to_supabase_and_geojson(project_id, source_crs):
-                    if convert_to_pmtiles():
+                    # [수정] PMTiles 변환 조건부 실행
+                    pmtiles_success = True
+                    if 'pmtiles' in output_formats:
+                        pmtiles_success = convert_to_pmtiles()
+                    
+                    if pmtiles_success:
                         if upload_to_r2(project_id, cache_control):
                             success = True
         else:
             if download_dxf_from_r2(project_id):
                 if dxf_to_geojson_and_db_json(project_id, source_crs, layers, centerline_layer, reverse_chainage, output_formats):
-                    if convert_to_pmtiles():
+                    # [수정] PMTiles 변환 조건부 실행
+                    pmtiles_success = True
+                    if 'pmtiles' in output_formats:
+                        pmtiles_success = convert_to_pmtiles()
+                    
+                    if pmtiles_success:
                         if upload_to_r2(project_id, cache_control):
                             success = True
 
