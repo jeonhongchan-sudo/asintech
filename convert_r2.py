@@ -1,15 +1,11 @@
 import os
-import math
 import sys
 import json
 import subprocess
-import re
-from datetime import datetime, timedelta, timezone
 import boto3
 import requests
 from botocore.client import Config
 import ezdxf
-from ezdxf import path as ezdxf_path
 from pyproj import Transformer
 try:
     from shapely.geometry import Point, LineString, MultiLineString
@@ -17,11 +13,6 @@ try:
 except ImportError:
     print("⚠️ Shapely library not found. Chainage calculation will be skipped.")
     Point, LineString, MultiLineString, linemerge = None, None, None, None
-try:
-    import matplotlib
-except ImportError:
-    print("⚠️ Matplotlib library not found. Text to Polyline conversion (Text_to_Pline) might fail or be inaccurate.")
-    matplotlib = None
 try:
     from supabase import create_client
     print("✅ Supabase library imported successfully.")
@@ -144,20 +135,22 @@ def get_chainage_details(line_geom, pt_geom, total_length, reverse=False):
         km = int(final_dist / 1000)
         m = final_dist % 1000
         
-        # 요청 포맷: 0+100.760/상행(우)/3.1 (소수점 3자리)
-        return f"{km}+{m:07.3f}/상행({direction_str})/{offset:.1f}"
+        # 요청 포맷: 0+100.76/상행(우)/3.1
+        return f"{km}+{m:06.2f}/상행({direction_str})/{offset:.1f}"
     except:
         return None
 
-def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline_layer=None, reverse_chainage=False):
+def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline_layer=None, reverse_chainage=False, output_formats=None):
     """DXF 파일을 GeoJSON으로 변환 (pyproj 좌표계 변환 및 레이어 필터링 적용)"""
     print(f"Converting DXF to GeoJSON (CRS: {source_crs})...")
     print(f"Target Layers: {target_layers}")
     
+    if output_formats is None: output_formats = ['pmtiles', 'json']
+    do_db_json = 'json' in output_formats
+    do_viz_pmtiles = 'pmtiles' in output_formats
+    
     try:
         transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
-        srid_code = source_crs.split(':')[1] if ':' in source_crs else source_crs
-        print(f"ℹ️ DB JSON will preserve original coordinates with SRID={srid_code}")
         doc = ezdxf.readfile("input.dxf")
         msp = doc.modelspace()
 
@@ -202,37 +195,34 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         stats = {'Point': 0, 'LineString': 0}
         db_json_list = [] # DB 업로드용 JSON 리스트
 
-        # [1] DB JSON 변환 함수 (Explode 없음)
-        def process_for_db(e):
+        def process_entity(e):
             try:
-                # Layer Filter (DB용은 엄격하게 적용)
-                if target_layers and e.dxf.layer not in target_layers: return
-                
-                # Text_to_Pline 레이어는 시각화 전용이므로 DB에서 제외
-                if e.dxf.layer.lower() == "text_to_pline": return
+                # [수정] target_layers가 비어있으면 모든 레이어 처리
+                # Worthless_Object 레이어는 target_layers에 없어도 처리 (특수 목적)
+                is_worthless = (e.dxf.layer.lower() == "worthless_object")
+                if target_layers and not is_worthless and e.dxf.layer not in target_layers: return
 
                 dxftype = e.dxftype()
-                
-                # 허용된 타입 (INSERT 포함, 분해하지 않음)
+                if dxftype == 'INSERT':
+                    # 블록 내부 형상은 분해하여 재귀 처리
+                    for sub_e in e.virtual_entities(): process_entity(sub_e)
+
+                # 블록 자체를 포함하여 허용된 타입만 처리
                 if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE', 'INSERT']: return
 
-                # 기본 속성 추출
-                props = {}
-                
-                # 회전각 (Web은 CW, DXF는 CCW -> 부호 반전)
+                geom_type = None
+                coords = []
+                props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype}
+
+                # 색상(ACI) 및 회전(Rotation) 정보 저장
+                props['color'] = e.dxf.get('color', 256)  # 256: ByLayer
                 if e.dxf.hasattr('rotation'):
+                    # DXF는 반시계(CCW), 웹(Mapbox/MapLibre)은 시계(CW) 방향이므로 부호 반전
                     props['rotation'] = -float(e.dxf.rotation)
-                else:
-                    props['rotation'] = 0
 
-                # 텍스트 내용
-                if dxftype in ['TEXT', 'MTEXT']:
-                    props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
-
-                # 좌표 및 체인리지 계산을 위한 기준점 (TM)
+                chainage_val = None
+                # 원본 TM 좌표 및 체인리지 계산
                 tm_pt = None
-                wkt_geom = None
-
                 if dxftype in ['TEXT', 'MTEXT', 'INSERT']:
                     tm_pt = e.dxf.insert
                 elif dxftype == 'POINT':
@@ -241,124 +231,25 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     tm_pt = e.dxf.center
                 elif dxftype == 'LINE':
                     tm_pt = e.dxf.start # 선은 시작점 기준
-                    # LineString WKT 생성
-                    p_s, p_e = e.dxf.start, e.dxf.end
-                    wkt_geom = f"SRID={srid_code};LINESTRING({p_s[0]} {p_s[1]}, {p_e[0]} {p_e[1]})"
-                elif dxftype == 'LWPOLYLINE':
-                    points = list(e.get_points('xy'))
-                    if points:
-                        tm_pt = points[0]
-                        if len(points) >= 2:
-                            t_pts = points
-                            if e.closed and t_pts[0] != t_pts[-1]: t_pts.append(t_pts[0])
-                            coord_str = ", ".join([f"{p[0]} {p[1]}" for p in t_pts])
-                            wkt_geom = f"SRID={srid_code};LINESTRING({coord_str})"
-                elif dxftype == 'POLYLINE':
-                    points = list(e.points())
-                    if points:
-                        tm_pt = points[0]
-                        if len(points) >= 2:
-                            t_pts = points
-                            if e.is_closed and t_pts[0] != t_pts[-1]: t_pts.append(t_pts[0])
-                            coord_str = ", ".join([f"{p[0]} {p[1]}" for p in t_pts])
-                            wkt_geom = f"SRID={srid_code};LINESTRING({coord_str})"
                 
-                chainage_val = None
                 if tm_pt:
                     props['tm_x'] = round(tm_pt[0], 3)
                     props['tm_y'] = round(tm_pt[1], 3)
                     
                     # 체인리지 계산 (Shapely Project)
-                    if centerline_geom and dxftype not in ['LINE', 'LWPOLYLINE', 'POLYLINE']:
-                        try:
-                            pt = Point(tm_pt[0], tm_pt[1])
-                            c_info = get_chainage_details(centerline_geom, pt, centerline_len, reverse_chainage)
-                            if c_info: chainage_val = c_info
-                        except: pass
-
-                # DB JSON 생성 (Schema 기반)
-                if schema:
-                    db_item = {}
-                    dxf_attrs = {
-                        "handle": e.dxf.handle,
-                        "layer": e.dxf.layer,
-                        "block_name": e.dxf.name if dxftype == 'INSERT' else None,
-                        "text": props.get('text'),
-                        "x": props.get('tm_x'),
-                        "y": props.get('tm_y'),
-                        "rotation": props.get('rotation', 0)
-                    }
-                    
-                    for col, rule in schema.items():
-                        src = rule.get("source")
-                        if src == "dxf":
-                            db_item[col] = dxf_attrs.get(rule.get("attr"))
-                        elif src == "calc":
-                            method = rule.get("method")
-                            if method == "chainage":
-                                db_item[col] = chainage_val
-                            elif method == "wkt":
-                                # DB에는 WKT 저장 (Line/Poly는 LineString, 나머지는 Point)
-                                if wkt_geom:
-                                    db_item[col] = wkt_geom
-                                elif tm_pt:
-                                    db_item[col] = f"SRID={srid_code};POINT({tm_pt[0]} {tm_pt[1]})"
-                    
-                    db_json_list.append(db_item)
-            except: pass
-
-        # [2] 시각화(PMTiles) 변환 함수 (Explode 포함)
-        def process_for_viz(e):
-            try:
-                # Layer Filter (Text_to_Pline 허용)
-                is_special = (e.dxf.layer.lower() == "text_to_pline")
-                if target_layers and not is_special and e.dxf.layer not in target_layers: return
-
-                dxftype = e.dxftype()
-
-                # INSERT(블록) -> Explode (재귀)
-                if dxftype == 'INSERT':
-                    for sub_e in e.virtual_entities(): process_for_viz(sub_e)
-                    # [수정] Text_to_Pline 레이어는 단순 그림이므로 Point 생성 건너뜀
-                    if is_special: return
-                    # 그 외 블록은 아래 로직을 통해 Point 생성 (속성 포함)
-
-                if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE', 'INSERT']: return
-
-                geom_type = None
-                coords = []
-                props = {"handle": e.dxf.handle, "layer": e.dxf.layer}
-
-                # 시각화용 속성
-                props['color'] = e.dxf.get('color', 256)
-                if e.dxf.hasattr('rotation'):
-                    props['rotation'] = -float(e.dxf.rotation)
-                else:
-                    props['rotation'] = 0
-                
-                if dxftype in ['TEXT', 'MTEXT']:
-                    props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
-                    props['height'] = e.dxf.get('char_height', 1.0) if dxftype == 'MTEXT' else e.dxf.get('height', 1.0)
-
-                # [추가] 원본 좌표 및 체인리지 정보 속성 추가 (시각화용)
-                tm_pt = None
-                if dxftype in ['TEXT', 'MTEXT', 'INSERT']: tm_pt = e.dxf.insert
-                elif dxftype == 'POINT': tm_pt = e.dxf.location
-                elif dxftype == 'CIRCLE': tm_pt = e.dxf.center
-                elif dxftype == 'LINE': tm_pt = e.dxf.start
-
-                if tm_pt:
-                    props['tm_x'] = round(tm_pt[0], 3)
-                    props['tm_y'] = round(tm_pt[1], 3)
-                    
                     if centerline_geom:
                         try:
                             pt = Point(tm_pt[0], tm_pt[1])
                             c_info = get_chainage_details(centerline_geom, pt, centerline_len, reverse_chainage)
-                            if c_info: props['chainage'] = c_info
+                            if c_info:
+                                props['chainage'] = c_info
+                            chainage_val = props['chainage']
                         except: pass
 
-                # Geometry Conversion (기존 로직 활용)
+                if dxftype in ['TEXT', 'MTEXT']:
+                    props['text'] = e.dxf.text if dxftype == 'TEXT' else e.text
+
+                # Geometry Conversion
                 if dxftype == 'LINE':
                     geom_type = "LineString"
                     p_s, p_e = e.dxf.start, e.dxf.end
@@ -393,30 +284,55 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     except: pass
 
                 if geom_type and coords:
-                    feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
-                    features_map[geom_type].append(feat)
-                    stats[geom_type] += 1
+                    if do_viz_pmtiles:
+                        feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
+                        features_map[geom_type].append(feat)
+                        stats[geom_type] += 1
+
+                    # [DB JSON 생성] 스키마 기반 매핑
+                    if do_db_json and schema:
+                        db_item = {}
+                        dxf_attrs = {
+                            "handle": e.dxf.handle,
+                            "layer": e.dxf.layer,
+                            "block_name": e.dxf.name if dxftype == 'INSERT' else None,
+                            "text": props.get('text'),
+                            "x": props.get('tm_x'),
+                            "y": props.get('tm_y'),
+                            "rotation": props.get('rotation', 0)
+                        }
+                        
+                        for col, rule in schema.items():
+                            src = rule.get("source")
+                            if src == "dxf":
+                                db_item[col] = dxf_attrs.get(rule.get("attr"))
+                            elif src == "calc":
+                                method = rule.get("method")
+                                if method == "chainage":
+                                    db_item[col] = chainage_val
+                                elif method == "wkt":
+                                    if geom_type == "Point":
+                                        db_item[col] = f"SRID=4326;POINT({coords[0]} {coords[1]})"
+                                    elif geom_type == "LineString":
+                                        pairs = ", ".join([f"{c[0]} {c[1]}" for c in coords])
+                                        db_item[col] = f"SRID=4326;LINESTRING({pairs})"
+                        
+                        db_json_list.append(db_item)
+
             except: pass
         
-        # [실행] 1단계: DB JSON 생성 (Explode 없음)
-        print("Phase 1: Generating DB JSON (No Explode)...")
-        for e in msp: process_for_db(e)
-        
-        # [실행] 2단계: 시각화 데이터 생성 (Explode 포함)
-        print("Phase 2: Generating Visualization Data (Explode)...")
-        for e in msp: process_for_viz(e)
-        
+        for e in msp: process_entity(e)
         print(f"Conversion Stats: {stats}")
 
-        if features_map['Point']:
+        if do_viz_pmtiles and features_map['Point']:
             with open("temp_point.geojson", "w", encoding="utf-8") as f:
                 json.dump({"type": "FeatureCollection", "features": features_map['Point']}, f, ensure_ascii=False)
-        if features_map['LineString']:
+        if do_viz_pmtiles and features_map['LineString']:
             with open("temp_line.geojson", "w", encoding="utf-8") as f:
                 json.dump({"type": "FeatureCollection", "features": features_map['LineString']}, f, ensure_ascii=False)
 
         # [DB용 JSON 저장]
-        if db_json_list:
+        if do_db_json and db_json_list:
             with open(f"CAD_{project_id}.json", "w", encoding="utf-8") as f:
                 json.dump(db_json_list, f, ensure_ascii=False)
 
@@ -433,7 +349,6 @@ def json_to_supabase_and_geojson(project_id, source_crs):
 
     try:
         transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
-        srid_code = source_crs.split(':')[1] if ':' in source_crs else source_crs
     except Exception as e:
         print(f"❌ Invalid CRS {source_crs}: {e}")
         return False
@@ -454,19 +369,46 @@ def json_to_supabase_and_geojson(project_id, source_crs):
             x = obj.get('x')
             y = obj.get('y')
             wkt = obj.get('wkt')
-
+            
+            tx, ty = None, None
             final_wkt = None
+            
+            if x is not None and y is not None:
+                try:
+                    tx, ty = transformer.transform(float(x), float(y))
+                except: pass
             
             if wkt:
                 clean_wkt = wkt.split(';')[-1] if ';' in wkt else wkt
                 clean_wkt = clean_wkt.strip().upper()
-                final_wkt = f"SRID={srid_code};{clean_wkt}"
+                try:
+                    if clean_wkt.startswith("POINT"):
+                        content = clean_wkt[clean_wkt.find("(")+1 : clean_wkt.find(")")]
+                        parts = content.split()
+                        if len(parts) >= 2:
+                            px, py = float(parts[0]), float(parts[1])
+                            tpx, tpy = transformer.transform(px, py)
+                            final_wkt = f"SRID=4326;POINT({tpx} {tpy})"
+                            if tx is None: tx, ty = tpx, tpy
+                    elif clean_wkt.startswith("LINESTRING"):
+                        content = clean_wkt[clean_wkt.find("(")+1 : clean_wkt.find(")")]
+                        pairs = content.split(',')
+                        new_pairs = []
+                        for pair in pairs:
+                            parts = pair.strip().split()
+                            if len(parts) >= 2:
+                                px, py = float(parts[0]), float(parts[1])
+                                tpx, tpy = transformer.transform(px, py)
+                                new_pairs.append(f"{tpx} {tpy}")
+                        if new_pairs:
+                            final_wkt = f"SRID=4326;LINESTRING({', '.join(new_pairs)})"
+                except: pass
             
             if not final_wkt:
-                if x is not None and y is not None:
-                    final_wkt = f"SRID={srid_code};POINT({x} {y})"
+                if tx is not None and ty is not None:
+                    final_wkt = f"SRID=4326;POINT({tx} {ty})"
                 elif wkt:
-                    final_wkt = f"SRID={srid_code};{clean_wkt}"
+                    final_wkt = f"SRID=4326;{clean_wkt}"
             
             row = {
                 "project_id": int(project_id),
@@ -474,8 +416,8 @@ def json_to_supabase_and_geojson(project_id, source_crs):
                 "layer": obj.get('layer'),
                 "block_name": obj.get('block_name'),
                 "text_content": obj.get('text'),
-                "x_coord": x,
-                "y_coord": y,
+                "x_coord": tx if tx is not None else x,
+                "y_coord": ty if ty is not None else y,
                 "rotation": obj.get('rotation'),
                 "chainage": obj.get('chainage'),
                 "geom": final_wkt
@@ -530,19 +472,6 @@ def json_to_supabase_and_geojson(project_id, source_crs):
                     content = wkt[11:-1]
                     coords = [list(map(float, p.strip().split())) for p in content.split(',')]
             
-            if coords:
-                try:
-                    if geom_type == "Point":
-                        tx, ty = transformer.transform(coords[0], coords[1])
-                        coords = [tx, ty]
-                    elif geom_type == "LineString":
-                        new_coords = []
-                        for p in coords:
-                            tx, ty = transformer.transform(p[0], p[1])
-                            new_coords.append([tx, ty])
-                        coords = new_coords
-                except: pass
-            
             if geom_type and geom_type in features_map:
                 props = {"handle": row['handle'], "layer": row['layer'], "text": row['text_content']}
                 if row.get('rotation'):
@@ -578,7 +507,7 @@ def convert_to_pmtiles():
         "--force",
         "--no-line-simplification",
         "--no-tiny-polygon-reduction",
-        "-r1.3"
+        "-r1.5"
     ]
     
     has_input = False
@@ -607,15 +536,6 @@ def upload_to_r2(project_id, cache_control):
     
     s3 = get_r2_client()
     supabase = get_supabase_client() # [수정] Supabase 클라이언트 가져오기
-
-    # [추가] 캐시 만료 시간 계산 (DB 기록용)
-    expiry_iso = None
-    if cache_control and "max-age=" in cache_control:
-        try:
-            seconds = int(re.search(r'max-age=(\d+)', cache_control).group(1))
-            expiry_dt = datetime.now(timezone.utc) + timedelta(seconds=seconds)
-            expiry_iso = expiry_dt.isoformat()
-        except: pass
 
     # [수정] 업로드할 파일과 메타데이터를 리스트로 관리
     files_to_upload = []
@@ -655,16 +575,7 @@ def upload_to_r2(project_id, cache_control):
 
             # 파일 업로드
             with open(local_path, "rb") as f:
-                extra_args = {}
-                if cache_control:
-                    extra_args['CacheControl'] = cache_control
-                
-                if file_type == 'pmtiles':
-                    extra_args['ContentType'] = 'application/vnd.pmtiles'
-                elif file_type == 'json':
-                    extra_args['ContentType'] = 'application/json'
-                
-                s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key, ExtraArgs=extra_args)
+                s3.upload_fileobj(f, R2_BUCKET_NAME, r2_key, ExtraArgs={'CacheControl': cache_control} if file_type == 'pmtiles' else {})
             print(f"  -> Upload success: {r2_key}")
 
             # Supabase 메타데이터 업데이트
@@ -673,9 +584,6 @@ def upload_to_r2(project_id, cache_control):
                 try:
                     size = os.path.getsize(local_path)
                     data = {"project_id": int(project_id), "file_type": file_type, "file_path": r2_key, "file_size": size, "updated_at": "now()"}
-                    if expiry_iso:
-                        data["cache_expiry"] = expiry_iso
-                    
                     res = supabase.table("cad_files").select("id").eq("file_path", r2_key).execute()
                     if res.data: supabase.table("cad_files").update(data).eq("file_path", r2_key).execute()
                     else: supabase.table("cad_files").insert(data).execute()
@@ -701,6 +609,7 @@ if __name__ == "__main__":
         centerline_layer = payload.get('centerline_layer')
         reverse_chainage = payload.get('reverse_chainage', False)
         input_type = payload.get('input_type', 'dxf')
+        output_formats = payload.get('output_formats', ['pmtiles', 'json'])
         
         print(f"Starting conversion for Project {project_id} (Type: {input_type})")
         
@@ -714,7 +623,7 @@ if __name__ == "__main__":
                             success = True
         else:
             if download_dxf_from_r2(project_id):
-                if dxf_to_geojson_and_db_json(project_id, source_crs, layers, centerline_layer, reverse_chainage):
+                if dxf_to_geojson_and_db_json(project_id, source_crs, layers, centerline_layer, reverse_chainage, output_formats):
                     if convert_to_pmtiles():
                         if upload_to_r2(project_id, cache_control):
                             success = True
