@@ -195,17 +195,15 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         stats = {'Point': 0, 'LineString': 0}
         db_json_list = [] # DB 업로드용 JSON 리스트
 
-        def process_entity(e):
+        def process_entity(e, is_inside_block=False):
             try:
                 # [수정] target_layers가 비어있으면 모든 레이어 처리
-                # Worthless_Object 레이어는 target_layers에 없어도 처리 (특수 목적)
-                is_worthless = (e.dxf.layer.lower() == "worthless_object")
-                if target_layers and not is_worthless and e.dxf.layer not in target_layers: return
+                if target_layers and e.dxf.layer not in target_layers: return
 
                 dxftype = e.dxftype()
-                if dxftype == 'INSERT':
-                    # 블록 내부 형상은 분해하여 재귀 처리
-                    for sub_e in e.virtual_entities(): process_entity(sub_e)
+                # [PMTiles] 블록(INSERT) 시각화: 분해하여 내부 객체 처리 (재귀)
+                if do_viz_pmtiles and dxftype == 'INSERT':
+                    for sub_e in e.virtual_entities(): process_entity(sub_e, is_inside_block=True)
 
                 # 블록 자체를 포함하여 허용된 타입만 처리
                 if dxftype not in ['TEXT', 'MTEXT', 'POINT', 'CIRCLE', 'LWPOLYLINE', 'LINE', 'POLYLINE', 'ARC', 'SPLINE', 'ELLIPSE', 'INSERT']: return
@@ -285,12 +283,15 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
 
                 if geom_type and coords:
                     if do_viz_pmtiles:
-                        feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
-                        features_map[geom_type].append(feat)
-                        stats[geom_type] += 1
+                        # INSERT 자체는 시각화 데이터(GeoJSON)에 넣지 않음 (분해된 내부 객체만 넣음)
+                        if dxftype != 'INSERT':
+                            feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
+                            features_map[geom_type].append(feat)
+                            stats[geom_type] += 1
 
                     # [DB JSON 생성] 스키마 기반 매핑
-                    if do_db_json and schema:
+                    # 블록 내부 객체(is_inside_block=True)는 DB에 저장하지 않음
+                    if do_db_json and not is_inside_block and schema:
                         db_item = {}
                         dxf_attrs = {
                             "handle": e.dxf.handle,
