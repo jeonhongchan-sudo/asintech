@@ -150,6 +150,9 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
     do_db_json = 'json' in output_formats
     do_viz_pmtiles = 'pmtiles' in output_formats
     
+    # [추가] 원본 SRID 추출 (예: "EPSG:5187" -> "5187")
+    srid = source_crs.split(':')[-1] if ':' in source_crs else '4326'
+
     try:
         transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
         doc = ezdxf.readfile("input.dxf")
@@ -211,6 +214,7 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
 
                 geom_type = None
                 coords = []
+                orig_coords = [] # [추가] 원본 좌표계 좌표 저장용
                 props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype}
 
                 # 색상(ACI) 및 회전(Rotation) 정보 저장
@@ -253,32 +257,40 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     geom_type = "LineString"
                     p_s, p_e = e.dxf.start, e.dxf.end
                     coords = [transformer.transform(p_s[0], p_s[1]), transformer.transform(p_e[0], p_e[1])]
+                    orig_coords = [[p_s[0], p_s[1]], [p_e[0], p_e[1]]]
                 elif dxftype == 'LWPOLYLINE':
                     points = list(e.get_points('xy'))
                     if len(points) < 2: return
                     coords = [transformer.transform(p[0], p[1]) for p in points]
+                    orig_coords = [[p[0], p[1]] for p in points]
                     if e.closed and coords[0] != coords[-1]: coords.append(coords[0])
+                    if e.closed and orig_coords[0] != orig_coords[-1]: orig_coords.append(orig_coords[0])
                     geom_type = "LineString"
                 elif dxftype == 'POLYLINE':
                     points = list(e.points())
                     if len(points) < 2: return
                     coords = [transformer.transform(p[0], p[1]) for p in points]
+                    orig_coords = [[p[0], p[1]] for p in points]
                     if e.is_closed and coords[0] != coords[-1]: coords.append(coords[0])
+                    if e.is_closed and orig_coords[0] != orig_coords[-1]: orig_coords.append(orig_coords[0])
                     geom_type = "LineString"
                 elif dxftype == 'CIRCLE':
                     geom_type = "Point"
                     p = e.dxf.center
                     coords = transformer.transform(p[0], p[1])
+                    orig_coords = [p[0], p[1]]
                     props['radius'] = e.dxf.radius
                 elif dxftype in ['TEXT', 'MTEXT', 'POINT', 'INSERT']:
                     geom_type = "Point"
                     p = e.dxf.insert if dxftype in ['TEXT', 'MTEXT', 'INSERT'] else e.dxf.location
                     coords = transformer.transform(p[0], p[1])
+                    orig_coords = [p[0], p[1]]
                 elif dxftype in ['ARC', 'SPLINE', 'ELLIPSE']:
                     try:
                         points = list(e.flattening(0.001))
                         if len(points) >= 2:
                             coords = [transformer.transform(p[0], p[1]) for p in points]
+                            orig_coords = [[p[0], p[1]] for p in points]
                             geom_type = "LineString"
                     except: pass
 
@@ -313,11 +325,12 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                                 if method == "chainage":
                                     db_item[col] = chainage_val
                                 elif method == "wkt":
+                                    # [수정] 원본 좌표계(orig_coords)와 선택된 SRID 사용
                                     if geom_type == "Point":
-                                        db_item[col] = f"SRID=4326;POINT({coords[0]} {coords[1]})"
+                                        db_item[col] = f"SRID={srid};POINT({orig_coords[0]} {orig_coords[1]})"
                                     elif geom_type == "LineString":
-                                        pairs = ", ".join([f"{c[0]} {c[1]}" for c in coords])
-                                        db_item[col] = f"SRID=4326;LINESTRING({pairs})"
+                                        pairs = ", ".join([f"{c[0]} {c[1]}" for c in orig_coords])
+                                        db_item[col] = f"SRID={srid};LINESTRING({pairs})"
                         
                         db_json_list.append(db_item)
 
