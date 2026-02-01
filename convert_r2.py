@@ -4,6 +4,7 @@ import json
 import subprocess
 import boto3
 import requests
+from datetime import datetime, timedelta, timezone
 from botocore.client import Config
 import ezdxf
 from pyproj import Transformer
@@ -540,6 +541,22 @@ def upload_to_r2(project_id, cache_control, output_formats=None):
     s3 = get_r2_client()
     supabase = get_supabase_client() # [수정] Supabase 클라이언트 가져오기
 
+    # [추가] 캐시 만료 시간 계산 (DB 업데이트용)
+    expiry_iso = None
+    if cache_control and "max-age=" in cache_control:
+        try:
+            # 예: "public, max-age=31536000" -> 31536000 추출
+            parts = cache_control.split("max-age=")
+            if len(parts) > 1:
+                # 숫자 뒤에 콤마나 세미콜론이 올 수 있으므로 처리
+                seconds_str = parts[1].split(",")[0].split(";")[0].strip()
+                seconds = int(seconds_str)
+                if seconds > 0:
+                    expiry_dt = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+                    expiry_iso = expiry_dt.isoformat()
+        except Exception as e:
+            print(f"⚠️ Cache expiry calculation failed: {e}")
+
     # [수정] 업로드할 파일과 메타데이터를 리스트로 관리
     files_to_upload = []
     
@@ -587,7 +604,17 @@ def upload_to_r2(project_id, cache_control, output_formats=None):
                 print(f"  -> Updating Supabase metadata for {file_type}...")
                 try:
                     size = os.path.getsize(local_path)
-                    data = {"project_id": int(project_id), "file_type": file_type, "file_path": r2_key, "file_size": size, "updated_at": "now()"}
+                    data = {
+                        "project_id": int(project_id), 
+                        "file_type": file_type, 
+                        "file_path": r2_key, 
+                        "file_size": size, 
+                        "updated_at": "now()"
+                    }
+                    # [추가] 캐시 만료 정보가 있으면 업데이트 데이터에 포함
+                    if expiry_iso:
+                        data["cache_expiry"] = expiry_iso
+                    
                     res = supabase.table("cad_files").select("id").eq("file_path", r2_key).execute()
                     if res.data: supabase.table("cad_files").update(data).eq("file_path", r2_key).execute()
                     else: supabase.table("cad_files").insert(data).execute()
