@@ -136,8 +136,9 @@ def get_chainage_details(line_geom, pt_geom, total_length, reverse=False):
         km = int(final_dist / 1000)
         m = final_dist % 1000
         
-        # 요청 포맷: 0+100.76/상행(우)/3.1
-        return f"{km}+{m:06.2f}/상행({direction_str})/{offset:.1f}"
+        # [설정] 정밀도 전략: 계산은 고정밀(Double)로 유지하고, 최종 출력 시 소수점 3자리(mm)로 반올림
+        # 포맷: 0+000.000 (전체 7자리, 소수점 3자리)
+        return f"{km}+{m:07.3f}/상행({direction_str})/{offset:.3f}"
     except:
         return None
 
@@ -216,6 +217,11 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 coords = []
                 orig_coords = [] # [추가] 원본 좌표계 좌표 저장용
                 props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": dxftype}
+                
+                # [추가] 텍스트 정렬 정보 추출
+                if dxftype == 'TEXT':
+                    props['align_h'] = e.dxf.halign
+                    props['align_v'] = e.dxf.valign
 
                 # 색상(ACI) 및 회전(Rotation) 정보 저장
                 props['color'] = e.dxf.get('color', 256)  # 256: ByLayer
@@ -236,8 +242,9 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     tm_pt = e.dxf.start # 선은 시작점 기준
                 
                 if tm_pt:
-                    props['tm_x'] = round(tm_pt[0], 3)
-                    props['tm_y'] = round(tm_pt[1], 3)
+                    # [수정] 계산 정밀도를 위해 불필요한 반올림 제거 (DB 저장 시에는 자동 처리됨)
+                    props['tm_x'] = tm_pt[0]
+                    props['tm_y'] = tm_pt[1]
                     
                     # 체인리지 계산 (Shapely Project)
                     if centerline_geom:
@@ -313,7 +320,9 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                             "text": props.get('text'),
                             "x": props.get('tm_x'),
                             "y": props.get('tm_y'),
-                            "rotation": props.get('rotation', 0)
+                            "rotation": props.get('rotation', 0),
+                            "align_h": props.get('align_h', 0),
+                            "align_v": props.get('align_v', 0)
                         }
                         
                         for col, rule in schema.items():
@@ -434,6 +443,8 @@ def json_to_supabase_and_geojson(project_id, source_crs):
                 "x_coord": tx if tx is not None else x,
                 "y_coord": ty if ty is not None else y,
                 "rotation": obj.get('rotation'),
+                "align_h": obj.get('align_h'),
+                "align_v": obj.get('align_v'),
                 "chainage": obj.get('chainage'),
                 "geom": final_wkt
             }
