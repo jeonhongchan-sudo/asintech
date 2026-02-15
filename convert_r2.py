@@ -533,7 +533,7 @@ def convert_to_pmtiles():
         "--force",
         "--no-line-simplification",
         "--no-tiny-polygon-reduction",
-        "-r1.3"
+        "-r1"
     ]
     
     has_input = False
