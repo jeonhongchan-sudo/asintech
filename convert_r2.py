@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import math
 import subprocess
 import boto3
 import requests
@@ -191,13 +192,12 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 except Exception as e:
                     print(f"Centerline merge failed: {e}")
         else:
-            if not centerline_layer:
-                print("ℹ️ No centerline layer provided. Chainage calculation skipped.")
-            elif not LineString:
+            if not centerline_layer: print("ℹ️ No centerline layer provided. Chainage calculation skipped.")
+            elif not LineString: 
                 print("⚠️ Centerline layer provided but Shapely library is missing. Chainage calculation skipped.")
         
-        features_map = {'Point': [], 'LineString': []}
-        stats = {'Point': 0, 'LineString': 0}
+        features_map = {'Point': [], 'LineString': [], 'Polygon': []}
+        stats = {'Point': 0, 'LineString': 0, 'Polygon': 0}
         db_json_list = [] # DB 업로드용 JSON 리스트
 
         def process_entity(e, is_inside_block=False):
@@ -206,6 +206,71 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 if target_layers and e.dxf.layer not in target_layers: return
 
                 dxftype = e.dxftype()
+
+                # [NEW] Special handling for polylines with width for visualization
+                if dxftype in ['LWPOLYLINE', 'POLYLINE'] and do_viz_pmtiles:
+                    segments = []
+                    # LWPOLYLINE: 각 정점의 start_width, end_width 정보를 가져옴
+                    if dxftype == 'LWPOLYLINE' and e.has_width:
+                        # xyseb: x, y, start_width, end_width, bulge
+                        pts = list(e.get_points('xyseb'))
+                        for i in range(len(pts) - 1):
+                            segments.append({
+                                'p1': (pts[i][0], pts[i][1]),
+                                'p2': (pts[i+1][0], pts[i+1][1]),
+                                'w1': pts[i][2],
+                                'w2': pts[i][3]
+                            })
+                    # POLYLINE: 각 버텍스의 속성에서 폭 정보를 가져옴
+                    elif dxftype == 'POLYLINE':
+                        verts = list(e.vertices)
+                        # 전체 중 하나라도 폭이 있는 경우 처리
+                        if any(v.dxf.start_width > 0 or v.dxf.end_width > 0 for v in verts):
+                            for i in range(len(verts) - 1):
+                                segments.append({
+                                    'p1': verts[i].dxf.location[:2],
+                                    'p2': verts[i+1].dxf.location[:2],
+                                    'w1': verts[i].dxf.start_width,
+                                    'w2': verts[i].dxf.end_width
+                                })
+
+                    if segments:
+                        processed_as_polygon = False
+                        for seg in segments:
+                            w1, w2 = seg['w1'], seg['w2']
+                            # 폭이 없는 구간은 무시 (또는 선으로 처리하고 싶다면 continue 대신 별도 로직 필요)
+                            if w1 <= 0 and w2 <= 0: continue
+
+                            p1, p2 = seg['p1'], seg['p2']
+                            dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+                            length = math.hypot(dx, dy)
+                            if length == 0: continue
+                            
+                            # 법선 벡터 계산 (Normal Vector)
+                            nx, ny = -dy / length, dx / length
+                            
+                            # 사각형(Trapezoid)의 4개 코너 좌표 계산
+                            v = [
+                                (p1[0] + nx * w1 / 2, p1[1] + ny * w1 / 2), # Start-Left
+                                (p2[0] + nx * w2 / 2, p2[1] + ny * w2 / 2), # End-Left
+                                (p2[0] - nx * w2 / 2, p2[1] - ny * w2 / 2), # End-Right
+                                (p1[0] - nx * w1 / 2, p1[1] - ny * w1 / 2)  # Start-Right
+                            ]
+                            
+                            poly_coords = [transformer.transform(pt[0], pt[1]) for pt in v]
+                            poly_coords.append(poly_coords[0]) # 링 닫기
+
+                            poly_props = {"handle": e.dxf.handle, "layer": e.dxf.layer, "dxftype": f"Polygon_from_{dxftype}"}
+                            poly_props['color'] = e.dxf.get('color', 256)
+
+                            feat = {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [poly_coords]}, "properties": poly_props}
+                            features_map['Polygon'].append(feat)
+                            stats['Polygon'] += 1
+                            processed_as_polygon = True
+                        
+                        # 하나라도 폴리곤으로 변환되었다면, 이 객체는 LineString으로 중복 변환하지 않음
+                        if processed_as_polygon: return
+
                 # [PMTiles] 블록(INSERT) 시각화: 분해하여 내부 객체 처리 (재귀)
                 if do_viz_pmtiles and dxftype == 'INSERT':
                     for sub_e in e.virtual_entities(): process_entity(sub_e, is_inside_block=True)
@@ -347,6 +412,9 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         
         for e in msp: process_entity(e)
         print(f"Conversion Stats: {stats}")
+        if do_viz_pmtiles and features_map['Polygon']:
+            with open("temp_polygon.geojson", "w", encoding="utf-8") as f:
+                json.dump({"type": "FeatureCollection", "features": features_map['Polygon']}, f, ensure_ascii=False)
 
         if do_viz_pmtiles and features_map['Point']:
             with open("temp_point.geojson", "w", encoding="utf-8") as f:
@@ -537,6 +605,9 @@ def convert_to_pmtiles():
     ]
     
     has_input = False
+    if os.path.exists("temp_polygon.geojson"):
+        cmd.extend(["-L", "polygon:temp_polygon.geojson"])
+        has_input = True
     if os.path.exists("temp_point.geojson"):
         cmd.extend(["-L", "point:temp_point.geojson"])
         has_input = True
