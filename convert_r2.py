@@ -627,7 +627,7 @@ def convert_to_pmtiles():
         print(f"Conversion failed: {e}")
         return False
 
-def upload_to_r2(project_id, cache_control, output_formats=None):
+def upload_to_r2(project_id, cache_control, source_crs, output_formats=None):
     """Cloudflare R2에 PMTiles 및 JSON 업로드"""
     print("Uploading to R2...")
     
@@ -703,7 +703,8 @@ def upload_to_r2(project_id, cache_control, output_formats=None):
                         "project_id": int(project_id), 
                         "file_type": file_type, 
                         "file_path": r2_key, 
-                        "file_size": size, 
+                        "file_size": size,
+                        "source_crs": source_crs,
                         "updated_at": "now()"
                     }
                     # [추가] 캐시 만료 정보가 있으면 업데이트 데이터에 포함
@@ -750,7 +751,7 @@ if __name__ == "__main__":
                         pmtiles_success = convert_to_pmtiles()
                     
                     if pmtiles_success:
-                        if upload_to_r2(project_id, cache_control, output_formats):
+                        if upload_to_r2(project_id, cache_control, source_crs, output_formats):
                             success = True
         else:
             if download_dxf_from_r2(project_id):
@@ -761,7 +762,7 @@ if __name__ == "__main__":
                         pmtiles_success = convert_to_pmtiles()
                     
                     if pmtiles_success:
-                        if upload_to_r2(project_id, cache_control, output_formats):
+                        if upload_to_r2(project_id, cache_control, source_crs, output_formats):
                             success = True
 
         if success:
