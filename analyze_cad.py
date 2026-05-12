@@ -64,8 +64,8 @@ def analyze(payload):
             print(f"🔄 Converting DWG to DXF using ODA at {actual_oda_path}...")
             # ODA 전용 명령 (가상 디스플레이 xvfb-run --auto-servernum 사용)
             # 인자: input_dir, output_dir, version, type, recurse, audit
-            # [수정] AutoCAD 2000(Map 3D) 이상의 구버전에서도 열릴 수 있도록 ACAD2000 버전으로 변경
-            cmd = f"xvfb-run --auto-servernum {actual_oda_path} ./input_dir ./output_dir \"ACAD2000\" \"DXF\" \"0\" \"1\""
+            # [수정] 한글 인코딩 문제 및 레이어명 깨짐 해결을 위해 유니코드를 지원하는 ACAD2018 버전으로 출력
+            cmd = f"xvfb-run --auto-servernum {actual_oda_path} ./input_dir ./output_dir \"ACAD2018\" \"DXF\" \"0\" \"1\""
             print(f"🚀 Running command: {cmd}")
             subprocess.run(cmd, shell=True, check=True)
             
