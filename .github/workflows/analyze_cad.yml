@@ -12,17 +12,33 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+          cache: 'pip' # Python 패키지 캐싱 활성화
 
       - name: Install Dependencies
         run: |
           pip install ezdxf boto3 supabase requests
 
+      - name: Cache ODA Debian Package
+        if: endsWith(github.event.client_payload.file_name, '.dwg')
+        id: cache-oda-deb
+        uses: actions/cache@v3
+        with:
+          path: ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
+          key: ${{ runner.os }}-oda-deb-7.2b
+
       - name: Install ODA File Converter (for DWG)
         if: endsWith(github.event.client_payload.file_name, '.dwg')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libvbe0 libwaidm0 xvfb
-          wget https://download.opendesign.com/guestfiles/ODAFileConverter/ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
+          # 존재하지 않는 패키지 대신 표준 그래픽 라이브러리 및 xvfb 설치
+          sudo apt-get install -y libgl1 libx11-6 libxcb1 libxrender1 libxi6 libsm6 libice6 libxext6 xvfb
+          
+          # 캐시된 deb 파일이 없는 경우에만 다운로드
+          if [ ! -f "ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb" ]; then
+            wget -q https://download.opendesign.com/guestfiles/ODAFileConverter/ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
+          fi
+          
+          # dpkg 설치 시도 후 부족한 종속성은 apt-get install -f로 자동 해결
           sudo dpkg -i ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb || sudo apt-get install -f -y
 
       - name: Run Analysis Script
