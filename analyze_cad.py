@@ -64,8 +64,9 @@ def analyze(payload):
             print(f"🔄 Converting DWG to DXF using ODA at {actual_oda_path}...")
             # ODA 전용 명령 (가상 디스플레이 xvfb-run --auto-servernum 사용)
             # 인자: input_dir, output_dir, version, type, recurse, audit
-            # [수정] 한글 인코딩 문제 및 레이어명 깨짐 해결을 위해 유니코드를 지원하는 ACAD2018 버전으로 출력
-            cmd = f"xvfb-run --auto-servernum {actual_oda_path} ./input_dir ./output_dir \"ACAD2018\" \"DXF\" \"0\" \"1\""
+            # [수정] Audit(1) 옵션이 켜져있으면 한글 레이어명을 $TD_AUDIT...으로 강제 변경하므로 0으로 설정
+            # ACAD2018 버전은 유니코드를 기본 지원합니다.
+            cmd = f"xvfb-run --auto-servernum {actual_oda_path} ./input_dir ./output_dir \"ACAD2018\" \"DXF\" \"0\" \"0\""
             print(f"🚀 Running command: {cmd}")
             subprocess.run(cmd, shell=True, check=True)
             
@@ -78,11 +79,23 @@ def analyze(payload):
         if not os.path.exists(dxf_file):
             raise Exception("DXF file not found after conversion/download.")
 
-        # 3. 레이어 추출 (ezdxf)
+        # 3. 레이어 추출 (ezdxf) 및 MIF 인코딩 처리
         print("🔍 Extracting layers...")
         doc = ezdxf.readfile(dxf_file)
-        # 빈 레이어 제외 및 정렬
-        layers = [layer.dxf.name for layer in doc.layers if layer.dxf.name != '0']
+        
+        layers = []
+        for layer in doc.layers:
+            name = layer.dxf.name
+            if name == '0': continue
+            
+            # [추가] \M+... (MIF) 인코딩이 발견되면 한글로 디코딩
+            if "\\M+" in name:
+                try:
+                    name = ezdxf.tools.encoding.decode_mif(name)
+                except: pass
+            
+            layers.append(name)
+            
         layers.sort()
 
         # [추가] DXF 파일 재저장 (Sanitize)
