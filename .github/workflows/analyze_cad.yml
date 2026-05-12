@@ -43,6 +43,8 @@ jobs:
 
       - name: Verify ODA Installation
         run: |
+          echo "Checking ODA locations..."
+          ls -l /usr/local/bin/ODAFileConverter || echo "Not in /usr/local/bin"
           ls -l /usr/bin/ODAFileConverter || echo "Not in /usr/bin"
 
       - name: Run Analysis Script
@@ -54,7 +56,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           # [수정] 절대 경로를 명시하여 xvfb-run이 찾을 수 있도록 함
-          ODA_PATH: "/usr/bin/ODAFileConverter"
+          ODA_PATH: "/usr/local/bin/ODAFileConverter"
         run: |
           # client_payload를 JSON 문자열로 안전하게 전달
           python analyze_cad.py '${{ toJSON(github.event.client_payload) }}'

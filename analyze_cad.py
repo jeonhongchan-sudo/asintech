@@ -3,6 +3,7 @@ import sys
 import json
 import ezdxf
 import boto3
+import shutil
 import subprocess
 from supabase import create_client
 
@@ -34,6 +35,14 @@ def analyze(payload):
     local_raw = os.path.join("input_dir", file_name)
     dxf_file = ""
 
+    # ODA_PATH 유효성 확인 및 Fallback
+    actual_oda_path = ODA_PATH
+    if not os.path.exists(actual_oda_path) and not shutil.which(actual_oda_path):
+        # 환경변수 경로에 없으면 표준 경로 확인
+        fallback_path = "/usr/local/bin/ODAFileConverter"
+        if os.path.exists(fallback_path):
+            actual_oda_path = fallback_path
+
     try:
         # 1. R2에서 원본 파일 다운로드
         print(f"📥 Downloading {file_name} from R2...")
@@ -41,10 +50,11 @@ def analyze(payload):
         
         # 2. DWG인 경우 DXF로 변환
         if file_name.endswith('.dwg'):
-            print("🔄 Converting DWG to DXF using ODA File Converter...")
+            print(f"🔄 Converting DWG to DXF using ODA at {actual_oda_path}...")
             # ODA 전용 명령 (가상 디스플레이 xvfb-run 사용)
             # 인자: input_dir, output_dir, version, type, recurse, audit
-            cmd = f"xvfb-run {ODA_PATH} ./input_dir ./output_dir \"ACAD2018\" \"DXF\" \"0\" \"1\""
+            cmd = f"xvfb-run {actual_oda_path} ./input_dir ./output_dir \"ACAD2018\" \"DXF\" \"0\" \"1\""
+            print(f"🚀 Running command: {cmd}")
             subprocess.run(cmd, shell=True, check=True)
             
             # 변환된 파일명 찾기 (입력파일명.dxf 로 생성됨)
