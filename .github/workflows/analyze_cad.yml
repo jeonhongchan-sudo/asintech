@@ -23,8 +23,8 @@ jobs:
         id: cache-oda-deb
         uses: actions/cache@v3
         with:
-          path: ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
-          key: ${{ runner.os }}-oda-deb-7.2b-v4
+          path: ODAFileConverter_QT6_lnxX64_8.3dll_27.1.deb
+          key: ${{ runner.os }}-oda-deb-8.3-v1 # 새로운 버전과 캐시 키
 
       - name: Install ODA File Converter (for DWG)
         if: endsWith(github.event.client_payload.file_name, '.dwg')
@@ -39,7 +39,7 @@ jobs:
           sudo apt-get install -y libgl1 libx11-6 libxcb1 libxrender1 libxi6 libsm6 libice6 libxext6 xvfb libfontconfig1 libdbus-1-3 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxcb-cursor0
           
           # [수정] ODA 공식 사이트 대신 내 R2 버킷에서 안전하게 다운로드
-          if [ ! -f "ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb" ]; then
+          if [ ! -f "ODAFileConverter_QT6_lnxX64_8.3dll_27.1.deb" ]; then
             echo "📥 Fetching ODA Converter from R2 storage..."
             python3 -c "
             import boto3, os
@@ -48,10 +48,10 @@ jobs:
             "
           fi
           
-          # dpkg 설치 및 종속성 강제 해결
-          sudo dpkg -i ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb || true
+          # [수정] dpkg 설치 및 종속성 강제 해결 (새로운 파일명)
+          sudo dpkg -i ODAFileConverter_QT6_lnxX64_8.3dll_27.1.deb || true
           sudo apt-get install -f -y
-          sudo dpkg -i ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
+          sudo dpkg -i ODAFileConverter_QT6_lnxX64_8.3dll_27.1.deb
 
       - name: Verify ODA Installation
         if: endsWith(github.event.client_payload.file_name, '.dwg')
