@@ -87,7 +87,25 @@ def analyze(payload):
         # 기존 convert_r2.py는 cad_data/CAD_{project_id}.dxf 경로를 사용함
         target_dxf_key = f"cad_data/CAD_{project_id}.dxf"
         print(f"📤 Uploading processed DXF to {target_dxf_key}...")
-        r2.upload_file(dxf_file, R2_BUCKET_NAME, target_dxf_key)
+        # [수정] Content-Type을 application/dxf로 명시하여 업로드
+        r2.upload_file(dxf_file, R2_BUCKET_NAME, target_dxf_key, ExtraArgs={'ContentType': 'application/dxf'})
+
+        # [추가] Supabase cad_files 테이블에 DXF 정보 등록 (convert_r2.py 연동용)
+        try:
+            file_size = os.path.getsize(dxf_file)
+            file_metadata = {
+                "project_id": int(project_id),
+                "file_type": "dxf",
+                "file_path": target_dxf_key,
+                "file_size": file_size,
+                "updated_at": "now()"
+            }
+            res = supabase.table("cad_files").select("id").eq("file_path", target_dxf_key).execute()
+            if res.data: supabase.table("cad_files").update(file_metadata).eq("file_path", target_dxf_key).execute()
+            else: supabase.table("cad_files").insert(file_metadata).execute()
+            print(f"✅ DXF metadata registered in cad_files table.")
+        except Exception as db_err:
+            print(f"⚠️ Failed to update cad_files metadata: {db_err}")
 
         # [추가] DWG 파일인 경우 분석 완료 후 R2에서 원본 자동 삭제
         if file_name.endswith('.dwg'):
