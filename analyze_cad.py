@@ -88,6 +88,11 @@ def analyze(payload):
             name = layer.dxf.name
             if name == '0': continue
             
+            # [추가] $TD_AUDIT... 패턴 필터링 (ODA 부작용 제거)
+            if name.startswith('$TD_AUDIT') or name.startswith('$'):
+                print(f"⚠️ Skipping ODA system layer: {name}")
+                continue
+            
             # [추가] \M+... (MIF) 인코딩이 발견되면 한글로 디코딩
             if "\\M+" in name:
                 try:
