@@ -16,7 +16,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install ezdxf boto3 supabase requests
+          pip install -r requirements.txt
 
       - name: Cache ODA Debian Package
         if: endsWith(github.event.client_payload.file_name, '.dwg')

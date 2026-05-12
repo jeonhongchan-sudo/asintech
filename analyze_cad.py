@@ -64,7 +64,8 @@ def analyze(payload):
             print(f"🔄 Converting DWG to DXF using ODA at {actual_oda_path}...")
             # ODA 전용 명령 (가상 디스플레이 xvfb-run --auto-servernum 사용)
             # 인자: input_dir, output_dir, version, type, recurse, audit
-            cmd = f"xvfb-run --auto-servernum {actual_oda_path} ./input_dir ./output_dir \"ACAD2018\" \"DXF\" \"0\" \"1\""
+            # [수정] AutoCAD 2000(Map 3D) 이상의 구버전에서도 열릴 수 있도록 ACAD2000 버전으로 변경
+            cmd = f"xvfb-run --auto-servernum {actual_oda_path} ./input_dir ./output_dir \"ACAD2000\" \"DXF\" \"0\" \"1\""
             print(f"🚀 Running command: {cmd}")
             subprocess.run(cmd, shell=True, check=True)
             
@@ -83,6 +84,11 @@ def analyze(payload):
         # 빈 레이어 제외 및 정렬
         layers = [layer.dxf.name for layer in doc.layers if layer.dxf.name != '0']
         layers.sort()
+
+        # [추가] DXF 파일 재저장 (Sanitize)
+        # ezdxf로 다시 저장하면 ODA에서 발생할 수 있는 구조적 오류와 인코딩 헤더 문제를 해결하여 타 프로그램에서의 충돌을 방지합니다.
+        print("💾 Sanitizing and re-saving DXF to fix encoding/corruption...")
+        doc.saveas(dxf_file)
         
         # 4. 분석용 DXF를 R2의 표준 경로로 업로드 (나중에 convert_r2.py가 쓸 수 있게)
         # 기존 convert_r2.py는 cad_data/CAD_{project_id}.dxf 경로를 사용함
