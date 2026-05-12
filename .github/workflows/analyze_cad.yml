@@ -41,11 +41,7 @@ jobs:
           # [수정] ODA 공식 사이트 대신 내 R2 버킷에서 안전하게 다운로드
           if [ ! -f "ODAFileConverter_QT6_lnxX64_8.3dll_27.1.deb" ]; then
             echo "📥 Fetching ODA Converter from R2 storage..."
-            python3 -c "
-            import boto3, os
-            s3 = boto3.client('s3', endpoint_url=f'https://{os.environ[\"R2_ACCOUNT_ID\"]}.r2.cloudflarestorage.com', aws_access_key_id=os.environ[\"R2_ACCESS_KEY_ID\"], aws_secret_access_key=os.environ[\"R2_SECRET_ACCESS_KEY\"])
-            s3.download_file(os.environ[\"R2_BUCKET_NAME\"], 'dependencies/ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb', 'ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb')
-            "
+            python3 -c "import boto3, os; s3 = boto3.client('s3', endpoint_url=f'https://{os.environ[\"R2_ACCOUNT_ID\"]}.r2.cloudflarestorage.com', aws_access_key_id=os.environ[\"R2_ACCESS_KEY_ID\"], aws_secret_access_key=os.environ[\"R2_SECRET_ACCESS_KEY\"]); s3.download_file(os.environ[\"R2_BUCKET_NAME\"], 'dependencies/ODAFileConverter_QT6_lnxX64_8.3dll_27.1.deb', 'ODAFileConverter_QT6_lnxX64_8.3dll_27.1.deb')"
           fi
           
           # [수정] dpkg 설치 및 종속성 강제 해결 (새로운 파일명)
