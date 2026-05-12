@@ -24,39 +24,28 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
-          key: ${{ runner.os }}-oda-deb-7.2b-v3
+          key: ${{ runner.os }}-oda-deb-7.2b-v4
 
       - name: Install ODA File Converter (for DWG)
         if: endsWith(github.event.client_payload.file_name, '.dwg')
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
           sudo apt-get update
           # ODA 실행에 필요한 모든 라이브러리 설치 (Ubuntu 24.04 호환성 강화)
           sudo apt-get install -y libgl1 libx11-6 libxcb1 libxrender1 libxi6 libsm6 libice6 libxext6 xvfb libfontconfig1 libdbus-1-3 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxcb-cursor0
           
-          # 파일 유효성 검사 함수 (파일이 없거나 10MB 미만이면 삭제)
-          validate_deb() {
-            if [ -f "ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb" ]; then
-              FILE_SIZE=$(stat -c%s "ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb")
-              if [ "$FILE_SIZE" -lt 10000000 ]; then
-                echo "⚠️ 기존 파일이 너무 작습니다 ($FILE_SIZE bytes). 삭제 후 다시 시도합니다."
-                rm ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
-              fi
-            fi
-          }
-
-          validate_deb
-          
-          # 파일이 없으면 다시 다운로드 시도
+          # [수정] ODA 공식 사이트 대신 내 R2 버킷에서 안전하게 다운로드
           if [ ! -f "ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb" ]; then
-            echo "Downloading ODA Converter..."
-            wget -qL --user-agent="Mozilla/5.0" --referer="https://www.opendesign.com/guestfiles/oda_file_converter" https://download.opendesign.com/guestfiles/ODAFileConverter/ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
-          fi
-          
-          # 최종 확인
-          if grep -qi "<html>" ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb || [ ! -s ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb ]; then
-            echo "❌ 에러: ODA 파일이 올바르지 않습니다. (HTML 에러 페이지 혹은 0바이트)"
-            echo "💡 팁: ODA 홈페이지에서 .deb를 다운받아 본인의 R2 'dependencies/' 폴더에 올려두는 것을 권장합니다."
-            exit 1
+            echo "📥 Fetching ODA Converter from R2 storage..."
+            python3 -c "
+            import boto3, os
+            s3 = boto3.client('s3', endpoint_url=f'https://{os.environ[\"R2_ACCOUNT_ID\"]}.r2.cloudflarestorage.com', aws_access_key_id=os.environ[\"R2_ACCESS_KEY_ID\"], aws_secret_access_key=os.environ[\"R2_SECRET_ACCESS_KEY\"])
+            s3.download_file(os.environ[\"R2_BUCKET_NAME\"], 'dependencies/ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb', 'ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb')
+            "
           fi
           
           # dpkg 설치 및 종속성 강제 해결
