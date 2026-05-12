@@ -30,22 +30,31 @@ jobs:
         if: endsWith(github.event.client_payload.file_name, '.dwg')
         run: |
           sudo apt-get update
-          # 존재하지 않는 패키지 대신 표준 그래픽 라이브러리 및 xvfb 설치
-          sudo apt-get install -y libgl1 libx11-6 libxcb1 libxrender1 libxi6 libsm6 libice6 libxext6 xvfb libfontconfig1 libdbus-1-3
+          # ODA 실행에 필요한 모든 라이브러리 설치 (Ubuntu 24.04 호환성 강화)
+          sudo apt-get install -y libgl1 libx11-6 libxcb1 libxrender1 libxi6 libsm6 libice6 libxext6 xvfb libfontconfig1 libdbus-1-3 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxcb-cursor0
           
           # 캐시된 deb 파일이 없는 경우에만 다운로드
           if [ ! -f "ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb" ]; then
             wget -q https://download.opendesign.com/guestfiles/ODAFileConverter/ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
           fi
           
-          # dpkg 설치 시도 후 부족한 종속성은 apt-get install -f로 자동 해결
-          sudo dpkg -i ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb || sudo apt-get install -f -y
+          # dpkg 설치 및 종속성 강제 해결
+          sudo dpkg -i ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb || true
+          sudo apt-get install -f -y
+          sudo dpkg -i ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
 
       - name: Verify ODA Installation
+        if: endsWith(github.event.client_payload.file_name, '.dwg')
         run: |
-          echo "Checking ODA locations..."
-          ls -l /usr/local/bin/ODAFileConverter || echo "Not in /usr/local/bin"
-          ls -l /usr/bin/ODAFileConverter || echo "Not in /usr/bin"
+          echo "Searching for ODA binary location..."
+          # 시스템 전체에서 ODAFileConverter 실행 파일 검색
+          ODA_BIN=$(find /usr -name "ODAFileConverter*" -type f -executable | head -n 1)
+          if [ -z "$ODA_BIN" ]; then
+            echo "❌ ODAFileConverter not found after installation!"
+            exit 1
+          fi
+          echo "✅ Found ODA at: $ODA_BIN"
+          echo "ODA_BIN_PATH=$ODA_BIN" >> $GITHUB_ENV
 
       - name: Run Analysis Script
         env:
@@ -55,8 +64,7 @@ jobs:
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # [수정] 절대 경로를 명시하여 xvfb-run이 찾을 수 있도록 함
-          ODA_PATH: "/usr/local/bin/ODAFileConverter"
+          ODA_PATH: ${{ env.ODA_BIN_PATH }}
         run: |
           # client_payload를 JSON 문자열로 안전하게 전달
           python analyze_cad.py '${{ toJSON(github.event.client_payload) }}'

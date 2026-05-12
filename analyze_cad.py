@@ -35,13 +35,19 @@ def analyze(payload):
     local_raw = os.path.join("input_dir", file_name)
     dxf_file = ""
 
-    # ODA_PATH 유효성 확인 및 Fallback
-    actual_oda_path = ODA_PATH
-    if not os.path.exists(actual_oda_path) and not shutil.which(actual_oda_path):
-        # 환경변수 경로에 없으면 표준 경로 확인
-        fallback_path = "/usr/local/bin/ODAFileConverter"
-        if os.path.exists(fallback_path):
-            actual_oda_path = fallback_path
+    # ODA_PATH 확인 및 자동 탐색 로직 개선
+    actual_oda_path = payload.get('oda_path') or ODA_PATH
+    if not actual_oda_path or not os.path.exists(actual_oda_path):
+        # PATH에서 검색
+        found_in_path = shutil.which("ODAFileConverter")
+        if found_in_path:
+            actual_oda_path = found_in_path
+        else:
+            # 일반적인 설치 경로 순차 확인
+            for p in ["/usr/local/bin/ODAFileConverter", "/usr/bin/ODAFileConverter"]:
+                if os.path.exists(p):
+                    actual_oda_path = p
+                    break
 
     try:
         # 1. R2에서 원본 파일 다운로드
@@ -50,10 +56,13 @@ def analyze(payload):
         
         # 2. DWG인 경우 DXF로 변환
         if file_name.endswith('.dwg'):
+            if not actual_oda_path or not os.path.exists(actual_oda_path):
+                raise Exception(f"ODA File Converter not found. Path: {actual_oda_path}")
+
             print(f"🔄 Converting DWG to DXF using ODA at {actual_oda_path}...")
-            # ODA 전용 명령 (가상 디스플레이 xvfb-run 사용)
+            # ODA 전용 명령 (가상 디스플레이 xvfb-run --auto-servernum 사용)
             # 인자: input_dir, output_dir, version, type, recurse, audit
-            cmd = f"xvfb-run {actual_oda_path} ./input_dir ./output_dir \"ACAD2018\" \"DXF\" \"0\" \"1\""
+            cmd = f"xvfb-run --auto-servernum {actual_oda_path} ./input_dir ./output_dir \"ACAD2018\" \"DXF\" \"0\" \"1\""
             print(f"🚀 Running command: {cmd}")
             subprocess.run(cmd, shell=True, check=True)
             
