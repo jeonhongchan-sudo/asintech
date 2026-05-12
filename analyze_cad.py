@@ -144,7 +144,8 @@ def analyze(payload):
         print(f"✅ Updating Supabase status for project {project_id}...")
         supabase.table("cad_projects").update({
             "status": "ANALYZED",
-            "available_layers": layers
+            "available_layers": layers,
+            "raw_file_path": None # [추가] raw_file_path는 더 이상 사용하지 않으므로 초기화
         }).eq("id", project_id).execute()
         
         print(f"🎉 Analysis Complete. Found {len(layers)} layers.")
@@ -152,7 +153,11 @@ def analyze(payload):
     except Exception as e:
         print(f"❌ Analysis failed: {e}")
         try:
-            supabase.table("cad_projects").update({"status": "ERROR"}).eq("id", project_id).execute()
+            # [추가] Supabase 업데이트 실패 시에도 로그를 남김
+            error_message = str(e)
+            print(f"Attempting to update Supabase project status to ERROR: {error_message}")
+            supabase.table("cad_projects").update({"status": "ERROR", "error_details": error_message}).eq("id", project_id).execute()
+            print(f"Successfully updated project {project_id} status to ERROR in Supabase.")
         except: pass
         sys.exit(1)
 
