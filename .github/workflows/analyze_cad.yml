@@ -24,7 +24,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
-          key: ${{ runner.os }}-oda-deb-7.2b
+          key: ${{ runner.os }}-oda-deb-7.2b-v2
 
       - name: Install ODA File Converter (for DWG)
         if: endsWith(github.event.client_payload.file_name, '.dwg')
@@ -35,7 +35,13 @@ jobs:
           
           # 캐시된 deb 파일이 없는 경우에만 다운로드
           if [ ! -f "ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb" ]; then
-            wget -q https://download.opendesign.com/guestfiles/ODAFileConverter/ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
+            wget -qL --user-agent="Mozilla/5.0" https://download.opendesign.com/guestfiles/ODAFileConverter/ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
+          fi
+
+          # 다운로드된 파일이 유효한지 확인 (HTML 에러 페이지 여부 체크)
+          if grep -qi "<html>" ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb; then
+            echo "❌ 에러: ODA 다운로드 링크가 만료되었거나 HTML 에러 페이지를 반환했습니다. 링크 주소를 확인하세요."
+            exit 1
           fi
           
           # dpkg 설치 및 종속성 강제 해결
