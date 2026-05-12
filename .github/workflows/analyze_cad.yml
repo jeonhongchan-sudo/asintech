@@ -1,0 +1,40 @@
+name: Analyze CAD Layers
+on:
+  repository_dispatch:
+    types: [analyze_cad]
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install ezdxf boto3 supabase requests
+
+      - name: Install ODA File Converter (for DWG)
+        if: endsWith(github.event.client_payload.file_name, '.dwg')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvbe0 libwaidm0 xvfb
+          wget https://download.opendesign.com/guestfiles/ODAFileConverter/ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb
+          sudo dpkg -i ODAFileConverter_QT5_lnxX64_7.2b_23.11.deb || sudo apt-get install -f -y
+
+      - name: Run Analysis Script
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # ODA Converter가 설치된 경로를 환경변수로 추가
+          ODA_PATH: "/usr/local/bin/ODAFileConverter"
+        run: |
+          # client_payload를 JSON 문자열로 안전하게 전달
+          python analyze_cad.py '${{ toJSON(github.event.client_payload) }}'
