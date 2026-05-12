@@ -37,7 +37,8 @@ def analyze(payload):
 
     # ODA_PATH 확인 및 자동 탐색 로직 개선
     actual_oda_path = payload.get('oda_path') or ODA_PATH
-    if not actual_oda_path or not os.path.exists(actual_oda_path):
+    # .desktop 파일이 걸려오는 경우를 대비해 유효성 검사 추가
+    if not actual_oda_path or not os.path.exists(actual_oda_path) or actual_oda_path.endswith('.desktop'):
         # PATH에서 검색
         found_in_path = shutil.which("ODAFileConverter")
         if found_in_path:

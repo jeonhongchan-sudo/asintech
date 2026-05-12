@@ -53,8 +53,8 @@ jobs:
         if: endsWith(github.event.client_payload.file_name, '.dwg')
         run: |
           echo "Searching for ODA binary location..."
-          # 시스템 전체에서 ODAFileConverter 실행 파일 검색
-          ODA_BIN=$(find /usr -name "ODAFileConverter*" -type f -executable | head -n 1)
+          # .desktop 파일을 제외하고 실제 실행 파일만 검색 (주로 /usr/bin 이나 /usr/local/bin)
+          ODA_BIN=$(find /usr/bin /usr/local/bin /opt -name "ODAFileConverter*" -type f -executable -not -name "*.desktop" | head -n 1)
           if [ -z "$ODA_BIN" ]; then
             echo "❌ ODAFileConverter not found after installation!"
             exit 1
