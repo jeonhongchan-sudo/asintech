@@ -5,6 +5,7 @@ import ezdxf
 import boto3
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from supabase import create_client
 
 # 환경변수 로드
@@ -98,7 +99,7 @@ def analyze(payload):
                 "file_type": "dxf",
                 "file_path": target_dxf_key,
                 "file_size": file_size,
-                "updated_at": "now()"
+                "updated_at": datetime.now(timezone.utc).isoformat()
             }
             res = supabase.table("cad_files").select("id").eq("file_path", target_dxf_key).execute()
             if res.data: supabase.table("cad_files").update(file_metadata).eq("file_path", target_dxf_key).execute()
