@@ -69,6 +69,14 @@ def analyze(payload):
         print(f"📤 Uploading processed DXF to {target_dxf_key}...")
         r2.upload_file(dxf_file, R2_BUCKET_NAME, target_dxf_key)
 
+        # [추가] DWG 파일인 경우 분석 완료 후 R2에서 원본 자동 삭제
+        if file_name.endswith('.dwg'):
+            try:
+                print(f"🗑️ Deleting original DWG from R2: {file_path}")
+                r2.delete_object(Bucket=R2_BUCKET_NAME, Key=file_path)
+            except Exception as delete_err:
+                print(f"⚠️ Failed to delete DWG: {delete_err}")
+
         # 5. Supabase 업데이트 (레이어 목록 저장 및 상태 변경)
         print(f"✅ Updating Supabase status for project {project_id}...")
         supabase.table("cad_projects").update({
