@@ -96,8 +96,7 @@ def analyze(payload):
         print(f"✅ Updating Supabase status for project {project_id}...")
         supabase.table("cad_projects").update({
             "status": "ANALYZED",
-            "available_layers": layers,
-            "raw_file_path": None # [추가] raw_file_path는 더 이상 사용하지 않으므로 초기화
+            "available_layers": layers
         }).eq("id", project_id).execute()
         
         print(f"🎉 Analysis Complete. Found {len(layers)} layers.")
