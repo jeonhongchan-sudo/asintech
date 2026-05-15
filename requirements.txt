@@ -5,3 +5,5 @@ shapely
 pyproj
 supabase
 matplotlib
+requests
+postgrest
