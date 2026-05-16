@@ -142,15 +142,10 @@ def get_chainage_details(line_geom, pt_geom, total_length, reverse=False):
         return f"{km}+{m:07.3f}/상행({direction_str})/{offset:.3f}"
     except:
         return None
-
-def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline_layer=None, reverse_chainage=False, output_formats=None):
+def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None, reverse_chainage=False):
     """DXF 파일을 GeoJSON으로 변환 (pyproj 좌표계 변환 및 레이어 필터링 적용)"""
     print(f"Converting DXF to GeoJSON (CRS: {source_crs})...")
-    print(f"Target Layers: {target_layers}")
-    
-    if output_formats is None: output_formats = ['pmtiles', 'json']
-    do_db_json = 'json' in output_formats
-    do_viz_pmtiles = 'pmtiles' in output_formats
+    print(f"Target Layers: {target_layers}")    
     
     # [추가] 원본 SRID 추출 (예: "EPSG:5187" -> "5187")
     srid = source_crs.split(':')[-1] if ':' in source_crs else '4326'
@@ -159,12 +154,6 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
         doc = ezdxf.readfile("input.dxf")
         msp = doc.modelspace()
-
-        # [Schema Load]
-        schema = {}
-        if os.path.exists("cad_schema.json"):
-            with open("cad_schema.json", "r", encoding="utf-8") as f:
-                schema = json.load(f).get("columns", {})
         
         # [추가] 도로중심선 지오메트리 추출 및 병합 (Shapely 사용)
         centerline_geom = None
@@ -198,7 +187,6 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
         
         features_map = {'Point': [], 'LineString': [], 'Polygon': []}
         stats = {'Point': 0, 'LineString': 0, 'Polygon': 0}
-        db_json_list = [] # DB 업로드용 JSON 리스트
 
         def process_entity(e, is_inside_block=False):
             try:
@@ -208,7 +196,7 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                 dxftype = e.dxftype()
 
                 # [NEW] Special handling for polylines with width for visualization
-                if dxftype in ['LWPOLYLINE', 'POLYLINE'] and do_viz_pmtiles:
+                if dxftype in ['LWPOLYLINE', 'POLYLINE']:
                     segments = []
                     # LWPOLYLINE: 각 정점의 start_width, end_width 정보를 가져옴
                     if dxftype == 'LWPOLYLINE' and e.has_width:
@@ -272,7 +260,7 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                         if processed_as_polygon: return
 
                 # [PMTiles] 블록(INSERT) 시각화: 분해하여 내부 객체 처리 (재귀)
-                if do_viz_pmtiles and dxftype == 'INSERT':
+                if dxftype == 'INSERT':
                     for sub_e in e.virtual_entities(): process_entity(sub_e, is_inside_block=True)
 
                 # 블록 자체를 포함하여 허용된 타입만 처리
@@ -367,225 +355,25 @@ def dxf_to_geojson_and_db_json(project_id, source_crs, target_layers, centerline
                     except: pass
 
                 if geom_type and coords:
-                    if do_viz_pmtiles:
-                        # INSERT 자체는 시각화 데이터(GeoJSON)에 넣지 않음 (분해된 내부 객체만 넣음)
-                        if dxftype != 'INSERT':
-                            feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
-                            features_map[geom_type].append(feat)
-                            stats[geom_type] += 1
-
-                    # [DB JSON 생성] 스키마 기반 매핑
-                    # 블록 내부 객체(is_inside_block=True)는 DB에 저장하지 않음
-                    if do_db_json and not is_inside_block and schema:
-                        db_item = {}
-                        dxf_attrs = {
-                            "handle": e.dxf.handle,
-                            "layer": e.dxf.layer,
-                            "block_name": e.dxf.name if dxftype == 'INSERT' else None,
-                            "text": props.get('text'),
-                            "x": props.get('tm_x'),
-                            "y": props.get('tm_y'),
-                            "rotation": props.get('rotation', 0),
-                            "align_h": props.get('align_h', 0),
-                            "align_v": props.get('align_v', 0)
-                        }
-                        
-                        for col, rule in schema.items():
-                            src = rule.get("source")
-                            if src == "dxf":
-                                db_item[col] = dxf_attrs.get(rule.get("attr"))
-                            elif src == "calc":
-                                method = rule.get("method")
-                                if method == "chainage":
-                                    db_item[col] = chainage_val
-                                elif method == "wkt":
-                                    # [수정] 원본 좌표계(orig_coords)와 선택된 SRID 사용
-                                    if geom_type == "Point":
-                                        db_item[col] = f"SRID={srid};POINT({orig_coords[0]} {orig_coords[1]})"
-                                    elif geom_type == "LineString":
-                                        pairs = ", ".join([f"{c[0]} {c[1]}" for c in orig_coords])
-                                        db_item[col] = f"SRID={srid};LINESTRING({pairs})"
-                        
-                        db_json_list.append(db_item)
+                    # INSERT 자체는 시각화 데이터(GeoJSON)에 넣지 않음 (분해된 내부 객체만 넣음)
+                    if dxftype != 'INSERT':
+                        feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
+                        features_map[geom_type].append(feat)
+                        stats[geom_type] += 1
 
             except: pass
         
         for e in msp: process_entity(e)
-        print(f"Conversion Stats: {stats}")
-        if do_viz_pmtiles and features_map['Polygon']:
-            with open("temp_polygon.geojson", "w", encoding="utf-8") as f:
-                json.dump({"type": "FeatureCollection", "features": features_map['Polygon']}, f, ensure_ascii=False)
-
-        if do_viz_pmtiles and features_map['Point']:
-            with open("temp_point.geojson", "w", encoding="utf-8") as f:
-                json.dump({"type": "FeatureCollection", "features": features_map['Point']}, f, ensure_ascii=False)
-        if do_viz_pmtiles and features_map['LineString']:
-            with open("temp_line.geojson", "w", encoding="utf-8") as f:
-                json.dump({"type": "FeatureCollection", "features": features_map['LineString']}, f, ensure_ascii=False)
-
-        # [DB용 JSON 저장]
-        if do_db_json and db_json_list:
-            with open(f"CAD_{project_id}.json", "w", encoding="utf-8") as f:
-                json.dump(db_json_list, f, ensure_ascii=False)
+        if features_map['Polygon']:
+            with open("temp_polygon.geojson", "w", encoding="utf-8") as f: json.dump({"type": "FeatureCollection", "features": features_map['Polygon']}, f, ensure_ascii=False)
+        if features_map['Point']:
+            with open("temp_point.geojson", "w", encoding="utf-8") as f: json.dump({"type": "FeatureCollection", "features": features_map['Point']}, f, ensure_ascii=False)
+        if features_map['LineString']:
+            with open("temp_line.geojson", "w", encoding="utf-8") as f: json.dump({"type": "FeatureCollection", "features": features_map['LineString']}, f, ensure_ascii=False)
 
         return True
     except Exception as e:
         print(f"GeoJSON conversion error: {e}")
-        return False
-
-def json_to_supabase_and_geojson(project_id, source_crs):
-    """JSON -> Supabase Insert -> GeoJSON Export"""
-    print("Processing JSON workflow...")
-    supabase = get_supabase_client()
-    if not supabase: return False
-
-    try:
-        transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
-    except Exception as e:
-        print(f"❌ Invalid CRS {source_crs}: {e}")
-        return False
-
-    try:
-        # 1. Load JSON
-        with open("input.json", "rb") as f:
-            raw_data = f.read()
-        try:
-            data = json.loads(raw_data.decode('utf-8-sig'))
-        except UnicodeDecodeError:
-            print("⚠️ UTF-8 decode failed, trying CP949...")
-            data = json.loads(raw_data.decode('cp949'))
-        
-        # 2. Prepare Data for Insert
-        insert_rows = []
-        for obj in data:
-            x = obj.get('x')
-            y = obj.get('y')
-            wkt = obj.get('wkt')
-            
-            tx, ty = None, None
-            final_wkt = None
-            
-            if x is not None and y is not None:
-                try:
-                    tx, ty = transformer.transform(float(x), float(y))
-                except: pass
-            
-            if wkt:
-                clean_wkt = wkt.split(';')[-1] if ';' in wkt else wkt
-                clean_wkt = clean_wkt.strip().upper()
-                try:
-                    if clean_wkt.startswith("POINT"):
-                        content = clean_wkt[clean_wkt.find("(")+1 : clean_wkt.find(")")]
-                        parts = content.split()
-                        if len(parts) >= 2:
-                            px, py = float(parts[0]), float(parts[1])
-                            tpx, tpy = transformer.transform(px, py)
-                            final_wkt = f"SRID=4326;POINT({tpx} {tpy})"
-                            if tx is None: tx, ty = tpx, tpy
-                    elif clean_wkt.startswith("LINESTRING"):
-                        content = clean_wkt[clean_wkt.find("(")+1 : clean_wkt.find(")")]
-                        pairs = content.split(',')
-                        new_pairs = []
-                        for pair in pairs:
-                            parts = pair.strip().split()
-                            if len(parts) >= 2:
-                                px, py = float(parts[0]), float(parts[1])
-                                tpx, tpy = transformer.transform(px, py)
-                                new_pairs.append(f"{tpx} {tpy}")
-                        if new_pairs:
-                            final_wkt = f"SRID=4326;LINESTRING({', '.join(new_pairs)})"
-                except: pass
-            
-            if not final_wkt:
-                if tx is not None and ty is not None:
-                    final_wkt = f"SRID=4326;POINT({tx} {ty})"
-                elif wkt:
-                    final_wkt = f"SRID=4326;{clean_wkt}"
-            
-            row = {
-                "project_id": int(project_id),
-                "handle": obj.get('handle'),
-                "layer": obj.get('layer'),
-                "block_name": obj.get('block_name'),
-                "text_content": obj.get('text'),
-                "x_coord": tx if tx is not None else x,
-                "y_coord": ty if ty is not None else y,
-                "rotation": obj.get('rotation'),
-                "align_h": obj.get('align_h'),
-                "align_v": obj.get('align_v'),
-                "chainage": obj.get('chainage'),
-                "geom": final_wkt
-            }
-            insert_rows.append(row)
-
-        # 3. Delete Old Data & Insert New (Batch)
-        print(f"Deleting old data for project {project_id}...")
-        supabase.table("cad_objects").delete().eq("project_id", project_id).execute()
-        
-        print(f"Inserting {len(insert_rows)} rows...")
-        batch_size = 1000
-        for i in range(0, len(insert_rows), batch_size):
-            batch = insert_rows[i:i+batch_size]
-            supabase.table("cad_objects").insert(batch).execute()
-        
-        # 4. Fetch Data as GeoJSON
-        print("Fetching data and generating GeoJSON...")
-        
-        all_rows = []
-        current = 0
-        limit = 1000
-        while True:
-            res = supabase.table("cad_objects").select("handle, layer, text_content, geom, rotation, chainage").eq("project_id", project_id).range(current*limit, (current+1)*limit-1).execute()
-            if not res.data: break
-            all_rows.extend(res.data)
-            if len(res.data) < limit: break
-            current += 1
-            
-        features_map = {'Point': [], 'LineString': []}
-        
-        for row in all_rows:
-            geom_val = row['geom']
-            if not geom_val: continue
-            
-            geom_type = None
-            coords = []
-            
-            if isinstance(geom_val, dict):
-                geom_type = geom_val.get('type')
-                coords = geom_val.get('coordinates')
-            elif isinstance(geom_val, str):
-                wkt = geom_val
-                if ';' in wkt: wkt = wkt.split(';')[1]
-                
-                if wkt.startswith("POINT"):
-                    geom_type = "Point"
-                    content = wkt[6:-1]
-                    coords = list(map(float, content.split()))
-                elif wkt.startswith("LINESTRING"):
-                    geom_type = "LineString"
-                    content = wkt[11:-1]
-                    coords = [list(map(float, p.strip().split())) for p in content.split(',')]
-            
-            if geom_type and geom_type in features_map:
-                props = {"handle": row['handle'], "layer": row['layer'], "text": row['text_content']}
-                if row.get('rotation'):
-                    props['rotation'] = -float(row['rotation'])
-                if row.get('chainage'):
-                    props['chainage'] = row['chainage']
-                
-                feat = {"type": "Feature", "geometry": {"type": geom_type, "coordinates": coords}, "properties": props}
-                features_map[geom_type].append(feat)
-
-        if features_map['Point']:
-            with open("temp_point.geojson", "w", encoding="utf-8") as f:
-                json.dump({"type": "FeatureCollection", "features": features_map['Point']}, f, ensure_ascii=False)
-        if features_map['LineString']:
-            with open("temp_line.geojson", "w", encoding="utf-8") as f:
-                json.dump({"type": "FeatureCollection", "features": features_map['LineString']}, f, ensure_ascii=False)
-        
-        return True
-    except Exception as e:
-        print(f"JSON workflow error: {e}")
         return False
 
 def convert_to_pmtiles():
@@ -627,11 +415,9 @@ def convert_to_pmtiles():
         print(f"Conversion failed: {e}")
         return False
 
-def upload_to_r2(project_id, cache_control, source_crs, output_formats=None):
-    """Cloudflare R2에 PMTiles 및 JSON 업로드"""
+def upload_to_r2(project_id, cache_control, source_crs):
+    """Cloudflare R2에 PMTiles 업로드 및 메타데이터 갱신"""
     print("Uploading to R2...")
-    
-    if output_formats is None: output_formats = ['pmtiles', 'json']
     
     s3 = get_r2_client()
     supabase = get_supabase_client() # [수정] Supabase 클라이언트 가져오기
@@ -655,21 +441,11 @@ def upload_to_r2(project_id, cache_control, source_crs, output_formats=None):
     # [수정] 업로드할 파일과 메타데이터를 리스트로 관리
     files_to_upload = []
     
-    # 1. PMTiles 파일 정보
-    if 'pmtiles' in output_formats and os.path.exists("output.pmtiles"):
+    if os.path.exists("output.pmtiles"):
         files_to_upload.append({
             "local_path": "output.pmtiles",
             "r2_key": f"cad_data/cad_{project_id}_Data.pmtiles",
             "file_type": "pmtiles"
-        })
-        
-    # 2. DB용 JSON 파일 정보
-    json_file_local = f"CAD_{project_id}.json"
-    if 'json' in output_formats and os.path.exists(json_file_local):
-        files_to_upload.append({
-            "local_path": json_file_local,
-            "r2_key": f"cad_data/CAD_{project_id}.json",
-            "file_type": "json"
         })
 
     if not files_to_upload:
@@ -742,28 +518,11 @@ if __name__ == "__main__":
         
         success = False
         
-        if input_type == 'json':
-            if download_json_from_r2(project_id):
-                if json_to_supabase_and_geojson(project_id, source_crs):
-                    # [수정] PMTiles 변환 조건부 실행
-                    pmtiles_success = True
-                    if 'pmtiles' in output_formats:
-                        pmtiles_success = convert_to_pmtiles()
-                    
-                    if pmtiles_success:
-                        if upload_to_r2(project_id, cache_control, source_crs, output_formats):
-                            success = True
-        else:
-            if download_dxf_from_r2(project_id):
-                if dxf_to_geojson_and_db_json(project_id, source_crs, layers, centerline_layer, reverse_chainage, output_formats):
-                    # [수정] PMTiles 변환 조건부 실행
-                    pmtiles_success = True
-                    if 'pmtiles' in output_formats:
-                        pmtiles_success = convert_to_pmtiles()
-                    
-                    if pmtiles_success:
-                        if upload_to_r2(project_id, cache_control, source_crs, output_formats):
-                            success = True
+        if download_dxf_from_r2(project_id):
+            if dxf_to_geojson(project_id, source_crs, layers, centerline_layer, reverse_chainage):
+                if convert_to_pmtiles():
+                    if upload_to_r2(project_id, cache_control, source_crs):
+                        success = True
 
         if success:
             print("All steps completed successfully.")
