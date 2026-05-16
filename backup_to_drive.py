@@ -14,14 +14,15 @@ def process_single_image(client, memo_id, project_id, url):
     """개별 이미지를 다운로드하여 구글 드라이브로 백업하는 작업 단위 (Thread용)"""
     url = url.strip()
     if not url or "r2.dev" not in url:
-        return True # 처리할 대상 아님
+        return True
 
-    # R2 경로 변환 (preview -> orig, webp -> jpg)
+    # R2 경로 변환
     orig_url = url.replace("/preview/", "/orig/").replace(".webp", ".jpg")
     file_name = orig_url.split('/')[-1]
+    # Supabase Python 클라이언트는 "now()" 대신 실제 ISO 문자열을 권장합니다.
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # [중복 체크] 이미 성공한 백업이 있는지 확인
+    # [중복 체크] 이미 성공한 백업 이력이 있는지 확인
     try:
         existing = client.table("backup_logs").select("id").eq("r2_url", url).eq("status", "completed").execute().data
         if existing:
@@ -32,13 +33,11 @@ def process_single_image(client, memo_id, project_id, url):
 
     try:
         # 1. R2에서 원본 다운로드
-        print(f"📥 다운로드 중: {file_name}")
         file_res = requests.get(orig_url, timeout=30)
         if file_res.status_code != 200:
             raise Exception(f"R2 다운로드 실패 ({file_res.status_code})")
         
         # 2. GAS(구글 드라이브)로 전송
-        print(f"📤 드라이브 전송 중: {file_name}")
         file_data_base64 = base64.b64encode(file_res.content).decode('utf-8')
         
         gas_payload = {
@@ -49,7 +48,6 @@ def process_single_image(client, memo_id, project_id, url):
             "projectId": str(project_id)
         }
         
-        # GAS 요청 (timeout 넉넉히 60초)
         gas_res = requests.post(f"{GAS_URL}?action=uploadToDrive", json=gas_payload, timeout=60).json()
 
         if gas_res.get("success"):
@@ -72,7 +70,6 @@ def process_single_image(client, memo_id, project_id, url):
     except Exception as e:
         error_msg = str(e)
         print(f"❌ 실패: {file_name} ({error_msg})")
-        # 실패 로그 기록
         try:
             client.table("backup_logs").upsert({
                 "memo_id": memo_id, "project_id": str(project_id), "file_name": file_name,
@@ -83,7 +80,8 @@ def process_single_image(client, memo_id, project_id, url):
 
 def main():
     client = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={
-        "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}"
     })
 
     print("🔍 백업 대기 중인 메모 조회...")
@@ -102,17 +100,17 @@ def main():
         
         client.table("memos").update({"backup_status": "processing"}).eq("id", memo_id).execute()
 
+        # 모든 파일의 성공 여부를 추적
         all_success = True
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [executor.submit(process_single_image, client, memo_id, project_id, url) for url in urls]
             for future in as_completed(futures):
-                if not future.result():
-                    all_success = False
+                if not future.result(): all_success = False
 
-        # 모든 파일 처리 후 성공 여부에 따라 상태 업데이트
+        # 하나라도 실패하면 failed, 모두 성공하면 completed
         final_status = "completed" if all_success else "failed"
         client.table("memos").update({"backup_status": final_status}).eq("id", memo_id).execute()
-        print(f"🎊 메모 {memo_id} 처리 완료! (상태: {final_status})")
+        print(f"🎊 메모 {memo_id} 모든 파일 처리 완료! (최종 상태: {final_status})")
 
 if __name__ == "__main__":
     main()
