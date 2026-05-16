@@ -1,6 +1,7 @@
 import os
 import requests
 import base64
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from postgrest import SyncPostgrestClient
 
@@ -18,6 +19,7 @@ def process_single_image(client, memo_id, project_id, url):
     # R2 경로 변환 (preview -> orig, webp -> jpg)
     orig_url = url.replace("/preview/", "/orig/").replace(".webp", ".jpg")
     file_name = orig_url.split('/')[-1]
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     # [중복 체크] 이미 성공한 백업이 있는지 확인
     try:
@@ -59,7 +61,7 @@ def process_single_image(client, memo_id, project_id, url):
                 "r2_url": url,
                 "drive_file_id": gas_res.get("fileId"),
                 "status": "completed",
-                "updated_at": "now()"
+                "updated_at": now_iso
             }
             client.table("backup_logs").upsert(log_data, on_conflict="r2_url").execute()
             print(f"✅ 백업 완료: {file_name}")
@@ -74,16 +76,14 @@ def process_single_image(client, memo_id, project_id, url):
         try:
             client.table("backup_logs").upsert({
                 "memo_id": memo_id, "project_id": str(project_id), "file_name": file_name,
-                "r2_url": url, "status": "failed", "error_message": error_msg, "updated_at": "now()"
+                "r2_url": url, "status": "failed", "error_message": error_msg, "updated_at": now_iso
             }, on_conflict="r2_url").execute()
         except: pass
         return False
 
 def main():
-    # Supabase 클라이언트 초기화
     client = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}"
+        "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"
     })
 
     print("🔍 백업 대기 중인 메모 조회...")
@@ -102,14 +102,17 @@ def main():
         
         client.table("memos").update({"backup_status": "processing"}).eq("id", memo_id).execute()
 
-        # [핵심] ThreadPoolExecutor를 사용하여 최대 4개까지 병렬 처리
+        all_success = True
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [executor.submit(process_single_image, client, memo_id, project_id, url) for url in urls]
-            results = [f.result() for f in as_completed(futures)]
+            for future in as_completed(futures):
+                if not future.result():
+                    all_success = False
 
-        # 모든 파일 처리 후 메모 상태 업데이트
-        client.table("memos").update({"backup_status": "completed"}).eq("id", memo_id).execute()
-        print(f"🎊 메모 {memo_id} 모든 파일 처리 완료!")
+        # 모든 파일 처리 후 성공 여부에 따라 상태 업데이트
+        final_status = "completed" if all_success else "failed"
+        client.table("memos").update({"backup_status": final_status}).eq("id", memo_id).execute()
+        print(f"🎊 메모 {memo_id} 처리 완료! (상태: {final_status})")
 
 if __name__ == "__main__":
     main()
