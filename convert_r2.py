@@ -570,9 +570,9 @@ def run_recalculation(project_id, dxf_path):
                             p1, p2 = pts[i], pts[i+1]
                             row_len += ((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)**0.5
                 
-                row[idx_len] = f"{row_len:.4f}"
+                row[idx_len] = f"{row_len:.2f}"
                 total_m += row_len
-            pipe_info['total'] = f"{total_m / 1000.0:.4f}" # km 단위 저장
+            pipe_info['total'] = f"{total_m / 1000.0:.2f}" # km 단위 저장
 
         # --- B. 맨홀 정보 재계산 ---
         man_info = details.get('manholes_info', {})
