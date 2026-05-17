@@ -534,6 +534,7 @@ def run_recalculation(project_id, dxf_path):
                     layers = [l.strip().upper() for l in str(row[idx_meta]).split(',') if l.strip()]
                 
                 if not layers:
+                    print(f"    - Row {i}: No layers defined in metadata. Skipping calc, keeping current: {row[idx_len]}")
                     try: total_m += float(row[idx_len])
                     except: pass
                     p_data[i] = row
@@ -576,11 +577,13 @@ def run_recalculation(project_id, dxf_path):
                         for i in range(len(pts)-1):
                             p1, p2 = pts[i], pts[i+1]
                             row_len += ((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)**0.5
-                
+
                 row[idx_len] = f"{row_len:.2f}"
                 total_m += row_len
                 p_data[i] = row
+                print(f"    - Row {i} Updated: {row_len:.2f}m (Layers: {layers})")
             pipe_info['total'] = f"{total_m / 1000.0:.2f}" # km 단위 저장
+            print(f"  [Pipe] New Total: {pipe_info['total']} km")
 
         # --- B. 맨홀 정보 재계산 ---
         man_info = details.get('manholes_info', {})
@@ -588,6 +591,8 @@ def run_recalculation(project_id, dxf_path):
         idx_qty = next((i for i, h in enumerate(man_info.get('headers', [])) if "수량" in h), -1)
         idx_meta = next((i for i, h in enumerate(man_info.get('headers', [])) if h == "_layers"), -1)
         
+        print(f"  [Manhole Analysis] QtyIdx: {idx_qty}, MetaIdx: {idx_meta}")
+
         if idx_qty != -1 and idx_meta != -1:
             total_man = 0
             for i, row in enumerate(m_data):
@@ -597,6 +602,7 @@ def run_recalculation(project_id, dxf_path):
                     layers = [l.strip().upper() for l in str(row[idx_meta]).split(',') if l.strip()]
                 
                 if not layers:
+                    print(f"    - Row {i}: No layers defined. Current qty: {row[idx_qty]}")
                     try: total_man += int(float(row[idx_qty]))
                     except: pass
                     m_data[i] = row
@@ -610,7 +616,9 @@ def run_recalculation(project_id, dxf_path):
                 row[idx_qty] = str(row_qty)
                 total_man += row_qty
                 m_data[i] = row
+                print(f"    - Row {i} Updated: {row_qty} (Layers: {layers})")
             man_info['total'] = str(total_man)
+            print(f"  [Manhole] New Total: {man_info['total']}")
 
         # --- C. 시설물 정보 재계산 ---
         fac_info = details.get('facilities_info', {})
@@ -628,6 +636,7 @@ def run_recalculation(project_id, dxf_path):
                 diam = str(row[idx_f_diam]).strip() if idx_f_diam != -1 else ""
                 if name: row[idx_f_qty] = str(sum(1 for t in all_texts if name in t and (not diam or diam in t) and "하단" not in t))
                 f_data[i] = row
+            print(f"  [Facility] Recalculated {len(f_data)} item types.")
 
         # 3. Supabase 업데이트
         update_payload = {
@@ -636,11 +645,16 @@ def run_recalculation(project_id, dxf_path):
             "facilities_info": fac_info,
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
+        
+        print(f"  -> Final Payload Total Pipe: {update_payload['pipe_info'].get('total')}")
+        print(f"  -> Sending Update to Supabase for Project {project_id}...")
+        
         res = supabase.table("project_details").update(update_payload).eq("project_id", project_id).execute()
-        if res.data:
-            print("  -> Recalculation and Supabase update complete.")
+        if res.data and len(res.data) > 0:
+            print(f"  -> ✅ Success! Updated row ID: {res.data[0].get('id')}, Project: {res.data[0].get('project_id')}")
+            print(f"  -> Confirmed Pipe Total in DB: {res.data[0].get('pipe_info', {}).get('total')}")
         else:
-            print(f"  -> ⚠️ Supabase update failed: No rows matched project_id {project_id}")
+            print(f"  -> ⚠️ Update returned no data. Check RLS policies or Project ID {project_id} existence.")
     except Exception as e:
         print(f"  -> ❌ Recalculation failed: {e}")
 
