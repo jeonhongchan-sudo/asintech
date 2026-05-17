@@ -498,6 +498,124 @@ def upload_to_r2(project_id, cache_control, source_crs):
         print(f"Upload process failed: {e}")
         return False
 
+def run_recalculation(project_id, dxf_path):
+    """도면 갱신 시 기존 계산 정보(연장, 수량 등)를 자동으로 재계산하여 Supabase 업데이트"""
+    supabase = get_supabase_client()
+    if not supabase:
+        print("⚠️ Supabase client not available for recalculation.")
+        return
+
+    print(f"Starting automatic recalculation for Project {project_id}...")
+    
+    try:
+        # 1. 현재 저장된 프로젝트 정보 가져오기
+        res = supabase.table("project_details").select("*").eq("project_id", project_id).execute()
+        if not res.data:
+            print("  -> No project details found to update.")
+            return
+        
+        details = res.data[0]
+        doc = ezdxf.readfile(dxf_path)
+        msp = doc.modelspace()
+
+        # --- A. 관로 정보 재계산 ---
+        pipe_info = details.get('pipe_info', {})
+        p_headers = pipe_info.get('headers', [])
+        p_data = pipe_info.get('data', [])
+        idx_len = next((i for i, h in enumerate(p_headers) if "연장" in h), -1)
+        idx_meta = next((i for i, h in enumerate(p_headers) if h == "_layers"), -1)
+        
+        if idx_len != -1 and idx_meta != -1:
+            total_m = 0.0
+            for row in p_data:
+                if idx_meta >= len(row): continue
+                layers = [l.strip().upper() for l in str(row[idx_meta]).split(',') if l.strip()]
+                if not layers: continue
+                
+                row_len = 0.0
+                processed_handles = set()
+                processed_geometries = set() # 중복 객체 제거(Overkill) 로직
+                linear_types = ('LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'SPLINE', 'CIRCLE', 'ELLIPSE')
+                
+                for e in msp:
+                    if not e.is_alive or e.dxf.layer.upper() not in layers or e.dxf.invisible: continue
+                    if e.dxf.handle in processed_handles: continue
+                    processed_handles.add(e.dxf.handle)
+                    
+                    etype = e.dxftype()
+                    if etype not in linear_types: continue
+                    
+                    # 기하학적 중복 체크
+                    geo_key = None
+                    try:
+                        if etype == 'LINE':
+                            pts = sorted([(round(e.dxf.start.x, 3), round(e.dxf.start.y, 3)), (round(e.dxf.end.x, 3), round(e.dxf.end.y, 3))])
+                            geo_key = ("LINE", tuple(pts))
+                        elif etype == 'CIRCLE':
+                            geo_key = ("CIRCLE", (round(e.dxf.center.x, 3), round(e.dxf.center.y, 3)), round(e.dxf.radius, 3))
+                        elif etype == 'LWPOLYLINE':
+                            geo_key = ("LWPOLYLINE", tuple((round(p[0], 3), round(p[1], 3)) for p in e.get_points()), e.closed)
+                    except: pass
+                    
+                    if geo_key:
+                        if geo_key in processed_geometries: continue
+                        processed_geometries.add(geo_key)
+
+                    if etype == 'LINE': row_len += e.dxf.start.distance(e.dxf.end)
+                    elif etype == 'CIRCLE': row_len += 2 * math.pi * e.dxf.radius
+                    elif hasattr(e, 'length'): row_len += e.length
+                    elif etype in ('LWPOLYLINE', 'POLYLINE'):
+                        pts = list(e.get_points()) if etype == 'LWPOLYLINE' else [v.dxf.location for v in e.vertices]
+                        for i in range(len(pts)-1):
+                            p1, p2 = pts[i], pts[i+1]
+                            row_len += ((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)**0.5
+                
+                row[idx_len] = f"{row_len:.4f}"
+                total_m += row_len
+            pipe_info['total'] = f"{total_m / 1000.0:.4f}" # km 단위 저장
+
+        # --- B. 맨홀 정보 재계산 ---
+        man_info = details.get('manholes_info', {})
+        m_data = man_info.get('data', [])
+        idx_qty = next((i for i, h in enumerate(man_info.get('headers', [])) if "수량" in h), -1)
+        idx_meta = next((i for i, h in enumerate(man_info.get('headers', [])) if h == "_layers"), -1)
+        
+        if idx_qty != -1 and idx_meta != -1:
+            total_man = 0
+            for row in m_data:
+                layers = [l.strip().upper() for l in str(row[idx_meta]).split(',') if l.strip()]
+                if not layers: continue
+                row_qty = 0
+                processed_handles = set()
+                for e in msp:
+                    if e.dxf.layer.upper() in layers and e.dxf.handle not in processed_handles:
+                        processed_handles.add(e.dxf.handle)
+                        row_qty += 1
+                row[idx_qty] = str(row_qty)
+                total_man += row_qty
+            man_info['total'] = str(total_man)
+
+        # --- C. 시설물 정보 재계산 ---
+        fac_info = details.get('facilities_info', {})
+        f_headers = fac_info.get('headers', [])
+        f_data = fac_info.get('data', [])
+        idx_f_name, idx_f_qty = 0, next((i for i, h in enumerate(f_headers) if "수량" in h), -1)
+        idx_f_diam = next((i for i, h in enumerate(f_headers) if "관경" in h), -1)
+        
+        if idx_f_qty != -1:
+            all_texts = [e.dxf.text if e.dxftype() == 'TEXT' else (e.plain_text() if hasattr(e, 'plain_text') else e.text) 
+                         for e in list(msp.query('TEXT')) + list(msp.query('MTEXT'))]
+            for row in f_data:
+                name, diam = str(row[idx_f_name]).strip(), (str(row[idx_f_diam]).strip() if idx_f_diam != -1 else "")
+                if name: row[idx_f_qty] = str(sum(1 for t in all_texts if name in t and (not diam or diam in t) and "하단" not in t))
+
+        # 3. Supabase 업데이트
+        details['updated_at'] = datetime.now(timezone.utc).isoformat()
+        supabase.table("project_details").update(details).eq("project_id", project_id).execute()
+        print("  -> Recalculation and Supabase update complete.")
+    except Exception as e:
+        print(f"  -> ❌ Recalculation failed: {e}")
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python convert_r2.py <json_payload>")
@@ -522,6 +640,7 @@ if __name__ == "__main__":
             if dxf_to_geojson(project_id, source_crs, layers, centerline_layer, reverse_chainage):
                 if convert_to_pmtiles():
                     if upload_to_r2(project_id, cache_control, source_crs):
+                        run_recalculation(project_id, "input.dxf") # 업로드 성공 후 자동 재계산 수행
                         success = True
 
         if success:
