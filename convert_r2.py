@@ -517,13 +517,17 @@ def run_recalculation(project_id, dxf_path):
         details = res.data[0]
         doc = ezdxf.readfile(dxf_path)
         msp = doc.modelspace()
+        print(f"  -> Recalculation: DXF Loaded ({len(msp)} entities).")
 
         # --- A. 관로 정보 재계산 ---
         pipe_info = details.get('pipe_info', {})
         p_headers = pipe_info.get('headers', [])
         p_data = pipe_info.get('data', [])
-        idx_len = next((i for i, h in enumerate(p_headers) if "연장" in h), -1)
+        idx_len = next((i for i, h in enumerate(p_headers) if h and "연장" in str(h)), -1)
         idx_meta = next((i for i, h in enumerate(p_headers) if h == "_layers"), -1)
+
+        print(f"  [Pipe Analysis] Headers found: {p_headers}")
+        print(f"  [Pipe Analysis] LenIdx: {idx_len}, MetaIdx: {idx_meta}")
         
         if idx_len != -1 and idx_meta != -1:
             total_m = 0.0
@@ -534,13 +538,14 @@ def run_recalculation(project_id, dxf_path):
                     layers = [l.strip().upper() for l in str(row[idx_meta]).split(',') if l.strip()]
                 
                 if not layers:
-                    print(f"    - Row {i}: No layers defined in metadata. Skipping calc, keeping current: {row[idx_len]}")
+                    print(f"    - Row {i}: No specific layers to recalculate. Keeping value: {row[idx_len]}")
                     try: total_m += float(row[idx_len])
                     except: pass
                     p_data[i] = row
                     continue
                 
                 row_len = 0.0
+                found_count = 0
                 processed_handles = set()
                 processed_geometries = set() # 중복 객체 제거(Overkill) 로직
                 linear_types = ('LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'SPLINE', 'CIRCLE', 'ELLIPSE')
@@ -573,26 +578,31 @@ def run_recalculation(project_id, dxf_path):
                     elif etype == 'CIRCLE': row_len += 2 * math.pi * e.dxf.radius
                     elif hasattr(e, 'length'): row_len += e.length
                     elif etype in ('LWPOLYLINE', 'POLYLINE'):
+                        # [수정] 인덱스 변수 i가 상위 반복문의 i(행 번호)를 덮어쓰지 않도록 idx_v로 변경
                         pts = list(e.get_points()) if etype == 'LWPOLYLINE' else [v.dxf.location for v in e.vertices]
-                        for i in range(len(pts)-1):
-                            p1, p2 = pts[i], pts[i+1]
+                        for idx_v in range(len(pts)-1):
+                            p1, p2 = pts[idx_v], pts[idx_v+1]
                             row_len += ((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)**0.5
-
+                        found_count += 1
+                
                 row[idx_len] = f"{row_len:.2f}"
                 total_m += row_len
                 p_data[i] = row
-                print(f"    - Row {i} Updated: {row_len:.2f}m (Layers: {layers})")
+                print(f"    - Row {i} Updated: {row_len:.2f}m (Found {found_count} items in {layers})")
             pipe_info['total'] = f"{total_m / 1000.0:.2f}" # km 단위 저장
-            print(f"  [Pipe] New Total: {pipe_info['total']} km")
+            print(f"  [Pipe] Recalculation finished. Total: {pipe_info['total']} km")
+        else:
+            print("  [Pipe] Recalculation skipped: Missing '연장' or '_layers' in headers.")
 
         # --- B. 맨홀 정보 재계산 ---
         man_info = details.get('manholes_info', {})
+        m_headers = man_info.get('headers', [])
         m_data = man_info.get('data', [])
-        idx_qty = next((i for i, h in enumerate(man_info.get('headers', [])) if "수량" in h), -1)
-        idx_meta = next((i for i, h in enumerate(man_info.get('headers', [])) if h == "_layers"), -1)
+        idx_qty = next((i for i, h in enumerate(m_headers) if h and "수량" in str(h)), -1)
+        idx_meta = next((i for i, h in enumerate(m_headers) if h == "_layers"), -1)
         
         print(f"  [Manhole Analysis] QtyIdx: {idx_qty}, MetaIdx: {idx_meta}")
-
+        
         if idx_qty != -1 and idx_meta != -1:
             total_man = 0
             for i, row in enumerate(m_data):
@@ -602,7 +612,7 @@ def run_recalculation(project_id, dxf_path):
                     layers = [l.strip().upper() for l in str(row[idx_meta]).split(',') if l.strip()]
                 
                 if not layers:
-                    print(f"    - Row {i}: No layers defined. Current qty: {row[idx_qty]}")
+                    print(f"    - Row {i}: No layers to recalculate. Skipping Manhole calc.")
                     try: total_man += int(float(row[idx_qty]))
                     except: pass
                     m_data[i] = row
@@ -618,7 +628,7 @@ def run_recalculation(project_id, dxf_path):
                 m_data[i] = row
                 print(f"    - Row {i} Updated: {row_qty} (Layers: {layers})")
             man_info['total'] = str(total_man)
-            print(f"  [Manhole] New Total: {man_info['total']}")
+            print(f"  [Manhole] Recalculation finished. Total: {man_info['total']}")
 
         # --- C. 시설물 정보 재계산 ---
         fac_info = details.get('facilities_info', {})
@@ -636,7 +646,6 @@ def run_recalculation(project_id, dxf_path):
                 diam = str(row[idx_f_diam]).strip() if idx_f_diam != -1 else ""
                 if name: row[idx_f_qty] = str(sum(1 for t in all_texts if name in t and (not diam or diam in t) and "하단" not in t))
                 f_data[i] = row
-            print(f"  [Facility] Recalculated {len(f_data)} item types.")
 
         # 3. Supabase 업데이트
         update_payload = {
@@ -645,16 +654,11 @@ def run_recalculation(project_id, dxf_path):
             "facilities_info": fac_info,
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
-        
-        print(f"  -> Final Payload Total Pipe: {update_payload['pipe_info'].get('total')}")
-        print(f"  -> Sending Update to Supabase for Project {project_id}...")
-        
         res = supabase.table("project_details").update(update_payload).eq("project_id", project_id).execute()
-        if res.data and len(res.data) > 0:
-            print(f"  -> ✅ Success! Updated row ID: {res.data[0].get('id')}, Project: {res.data[0].get('project_id')}")
-            print(f"  -> Confirmed Pipe Total in DB: {res.data[0].get('pipe_info', {}).get('total')}")
+        if res.data:
+            print("  -> Recalculation and Supabase update complete.")
         else:
-            print(f"  -> ⚠️ Update returned no data. Check RLS policies or Project ID {project_id} existence.")
+            print(f"  -> ⚠️ Supabase update failed: No rows matched project_id {project_id}")
     except Exception as e:
         print(f"  -> ❌ Recalculation failed: {e}")
 
