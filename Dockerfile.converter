@@ -1,0 +1,25 @@
+# 1. 파이썬 3.10 슬림 버전 베이스
+FROM python:3.10-slim
+
+# 2. Tippecanoe 빌드에 필요한 시스템 패키지 설치
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libsqlite3-dev \
+    zlib1g-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# 3. Tippecanoe 소스 다운로드 및 컴파일 (이미지에 포함됨)
+RUN git clone https://github.com/felt/tippecanoe.git \
+    && cd tippecanoe \
+    && make -j$(nproc) \
+    && make install \
+    && cd .. && rm -rf tippecanoe
+
+# 4. 파이썬 의존성 라이브러리 설치
+# shapely, pyproj 등이 미리 설치되어 실행 시 0초가 걸립니다.
+RUN pip install --no-cache-dir \
+    ezdxf shapely pyproj boto3 requests supabase
+
+WORKDIR /app
+# 이제 이 이미지는 'tippecanoe'와 '모든 라이브러리'를 가진 무적의 환경이 됩니다.
