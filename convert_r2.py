@@ -517,14 +517,23 @@ def run_recalculation(project_id, dxf_path):
         details = res.data[0]
         doc = ezdxf.readfile(dxf_path)
         msp = doc.modelspace()
+<<<<<<< HEAD
         print(f"  -> Recalculation: DXF Loaded ({len(msp)} entities).")
+=======
+        print(f"  -> Recalculation: DXF Loaded ({len(msp)} entities in modelspace).")
+>>>>>>> 36e5de9 (Initial commit: Migrate from custom deployment script to standard git)
 
         # --- A. 관로 정보 재계산 ---
         pipe_info = details.get('pipe_info', {})
         p_headers = pipe_info.get('headers', [])
         p_data = pipe_info.get('data', [])
+<<<<<<< HEAD
         idx_len = next((i for i, h in enumerate(p_headers) if h and "연장" in str(h)), -1)
         idx_meta = next((i for i, h in enumerate(p_headers) if h == "_layers"), -1)
+=======
+        idx_len = next((i for i, h in enumerate(p_headers) if h and "연장" in str(h)), -1) # '연장' 헤더 인덱스
+        idx_meta = next((i for i, h in enumerate(p_headers) if h == "_layers"), -1) # '_layers' 헤더 인덱스
+>>>>>>> 36e5de9 (Initial commit: Migrate from custom deployment script to standard git)
 
         print(f"  [Pipe Analysis] Headers found: {p_headers}")
         print(f"  [Pipe Analysis] LenIdx: {idx_len}, MetaIdx: {idx_meta}")
@@ -534,7 +543,11 @@ def run_recalculation(project_id, dxf_path):
             for i, row in enumerate(p_data):
                 row = list(row)  # 수정 가능하도록 리스트 변환
                 layers = []
+<<<<<<< HEAD
                 if 0 <= idx_meta < len(row):
+=======
+                if 0 <= idx_meta < len(row): # idx_meta가 row의 유효한 인덱스인지 확인
+>>>>>>> 36e5de9 (Initial commit: Migrate from custom deployment script to standard git)
                     layers = [l.strip().upper() for l in str(row[idx_meta]).split(',') if l.strip()]
                 
                 if not layers:
@@ -598,8 +611,13 @@ def run_recalculation(project_id, dxf_path):
         man_info = details.get('manholes_info', {})
         m_headers = man_info.get('headers', [])
         m_data = man_info.get('data', [])
+<<<<<<< HEAD
         idx_qty = next((i for i, h in enumerate(m_headers) if h and "수량" in str(h)), -1)
         idx_meta = next((i for i, h in enumerate(m_headers) if h == "_layers"), -1)
+=======
+        idx_qty = next((i for i, h in enumerate(m_headers) if h and "수량" in str(h)), -1) # '수량' 헤더 인덱스
+        idx_meta = next((i for i, h in enumerate(m_headers) if h == "_layers"), -1) # '_layers' 헤더 인덱스
+>>>>>>> 36e5de9 (Initial commit: Migrate from custom deployment script to standard git)
         
         print(f"  [Manhole Analysis] QtyIdx: {idx_qty}, MetaIdx: {idx_meta}")
         
@@ -608,7 +626,11 @@ def run_recalculation(project_id, dxf_path):
             for i, row in enumerate(m_data):
                 row = list(row)
                 layers = []
+<<<<<<< HEAD
                 if 0 <= idx_meta < len(row):
+=======
+                if 0 <= idx_meta < len(row): # idx_meta가 row의 유효한 인덱스인지 확인
+>>>>>>> 36e5de9 (Initial commit: Migrate from custom deployment script to standard git)
                     layers = [l.strip().upper() for l in str(row[idx_meta]).split(',') if l.strip()]
                 
                 if not layers:
@@ -634,8 +656,13 @@ def run_recalculation(project_id, dxf_path):
         fac_info = details.get('facilities_info', {})
         f_headers = fac_info.get('headers', [])
         f_data = fac_info.get('data', [])
+<<<<<<< HEAD
         idx_f_name, idx_f_qty = 0, next((i for i, h in enumerate(f_headers) if "수량" in h), -1)
         idx_f_diam = next((i for i, h in enumerate(f_headers) if "관경" in h), -1)
+=======
+        idx_f_name, idx_f_qty = 0, next((i for i, h in enumerate(f_headers) if h and "수량" in str(h)), -1) # '수량' 헤더 인덱스
+        idx_f_diam = next((i for i, h in enumerate(f_headers) if h and "관경" in str(h)), -1) # '관경' 헤더 인덱스
+>>>>>>> 36e5de9 (Initial commit: Migrate from custom deployment script to standard git)
         
         if idx_f_qty != -1:
             all_texts = [e.dxf.text if e.dxftype() == 'TEXT' else (e.plain_text() if hasattr(e, 'plain_text') else e.text) 

@@ -53,12 +53,4 @@ jobs:
         R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
       run: |
         # client_payload 전체를 JSON 문자열로 전달
-<<<<<<< HEAD
         python convert_r2.py '${{ toJson(github.event.client_payload) }}'
-=======
-<<<<<<< HEAD
-        python convert_r2.py '${{ toJson(github.event.client_payload) }}'
-=======
-        python convert_r2.py '${{ toJson(github.event.client_payload) }}'
->>>>>>> 5cc99f2648e660fbf9c474365f9006af6a8d87da
->>>>>>> 36e5de9 (Initial commit: Migrate from custom deployment script to standard git)
