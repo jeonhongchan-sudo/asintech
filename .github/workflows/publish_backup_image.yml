@@ -1,0 +1,38 @@
+name: Build and Publish Backup Image
+
+on:
+  # Dockerfile이나 설정이 바뀌었을 때 수동으로 실행 가능하게 설정
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04 # Ubuntu 버전을 22.04로 고정
+    permissions:
+      contents: read
+      packages: write # GHCR에 이미지를 올릴 권한
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/asintech-backup-env
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.backup
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/asintech-backup-env:latest
+          labels: ${{ steps.meta.outputs.labels }}

@@ -1,0 +1,11 @@
+# 1. 가볍고 안정적인 파이썬 3.10 버전 사용
+FROM python:3.10-slim
+
+# 2. 작업 디렉토리 설정
+WORKDIR /app
+
+# 3. 필요한 라이브러리 미리 설치 (매번 설치할 필요 없게 만듦)
+# backup_to_drive.py가 사용하는 핵심 라이브러리들입니다.
+RUN pip install --no-cache-dir requests supabase
+
+# 실행 환경 구성 완료
