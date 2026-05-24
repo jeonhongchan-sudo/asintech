@@ -147,13 +147,6 @@ def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None,
     print(f"Converting DXF to GeoJSON (CRS: {source_crs})...")
     print(f"Target Layers: {target_layers}")    
     
-    # [추가] 이전 실행의 잔재 삭제 (Tippecanoe 101 에러 방지)
-    for f in ["temp_point.geojson", "temp_line.geojson", "temp_polygon.geojson", "temp_combined.geojson"]:
-        if os.path.exists(f): os.remove(f)
-
-    # 레이어 필터 대소문자 무시를 위한 전처리
-    target_layers_upper = [l.upper() for l in target_layers] if target_layers else []
-
     # [추가] 원본 SRID 추출 (예: "EPSG:5187" -> "5187")
     srid = source_crs.split(':')[-1] if ':' in source_crs else '4326'
 
@@ -198,9 +191,8 @@ def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None,
 
         def process_entity(e, is_inside_block=False):
             try:
-                # [수정] 레이어 필터링 (대소문자 무시)
-                layer_upper = e.dxf.layer.upper()
-                if target_layers_upper and layer_upper not in target_layers_upper: return
+                # [복구] 과거의 안정적인 레이어 필터링 방식
+                if target_layers and e.dxf.layer not in target_layers: return
 
                 dxftype = e.dxftype()
 
@@ -374,8 +366,6 @@ def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None,
         
         for e in msp: process_entity(e)
 
-        print(f"Extraction results -> Point: {stats['Point']}, Line: {stats['LineString']}, Polygon: {stats['Polygon']}")
-
         # [추가] R2 보관용 통합 GeoJSON 생성 (모든 레이어 통합)
         combined_features = features_map['Point'] + features_map['LineString'] + features_map['Polygon']
         if combined_features:
@@ -407,18 +397,17 @@ def convert_to_pmtiles():
         "--force",
         "--no-line-simplification",
         "--no-tiny-polygon-reduction",
-        "--preserve-all-properties", # [추가] 모든 속성(handle 등) 보존 강제
         "-r1" # 포인트 누락 방지
     ]
     
     has_input = False
-    if os.path.exists("temp_polygon.geojson") and os.path.getsize("temp_polygon.geojson") > 50:
+    if os.path.exists("temp_polygon.geojson"):
         cmd.extend(["-L", "polygon:temp_polygon.geojson"])
         has_input = True
-    if os.path.exists("temp_point.geojson") and os.path.getsize("temp_point.geojson") > 50:
+    if os.path.exists("temp_point.geojson"):
         cmd.extend(["-L", "point:temp_point.geojson"])
         has_input = True
-    if os.path.exists("temp_line.geojson") and os.path.getsize("temp_line.geojson") > 50:
+    if os.path.exists("temp_line.geojson"):
         cmd.extend(["-L", "line:temp_line.geojson"])
         has_input = True
         
