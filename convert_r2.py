@@ -364,6 +364,13 @@ def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None,
             except: pass
         
         for e in msp: process_entity(e)
+
+        # [추가] R2 보관용 통합 GeoJSON 생성 (모든 레이어 통합)
+        combined_features = features_map['Point'] + features_map['LineString'] + features_map['Polygon']
+        if combined_features:
+            with open("temp_combined.geojson", "w", encoding="utf-8") as f:
+                json.dump({"type": "FeatureCollection", "features": combined_features}, f, ensure_ascii=False)
+
         if features_map['Polygon']:
             with open("temp_polygon.geojson", "w", encoding="utf-8") as f: json.dump({"type": "FeatureCollection", "features": features_map['Polygon']}, f, ensure_ascii=False)
         if features_map['Point']:
@@ -446,6 +453,28 @@ def upload_to_r2(project_id, cache_control, source_crs):
             "local_path": "output.pmtiles",
             "r2_key": f"cad_data/cad_{project_id}_Data.pmtiles",
             "file_type": "pmtiles"
+        })
+
+    # [추가] 생성된 GeoJSON 파일들을 업로드 목록에 포함 (point, line, polygon)
+    geojson_files = {
+        "temp_point.geojson": "point",
+        "temp_line.geojson": "line",
+        "temp_polygon.geojson": "polygon"
+    }
+    for local_name, layer_suffix in geojson_files.items():
+        if os.path.exists(local_name):
+            files_to_upload.append({
+                "local_path": local_name,
+                "r2_key": f"cad_data/CAD_{project_id}_{layer_suffix}.geojson",
+                "file_type": "geojson"
+            })
+
+    # [추가] 통합된 단일 GeoJSON 파일만 업로드 목록에 추가
+    if os.path.exists("temp_combined.geojson"):
+        files_to_upload.append({
+            "local_path": "temp_combined.geojson",
+            "r2_key": f"cad_data/CAD_{project_id}.geojson",
+            "file_type": "geojson"
         })
 
     if not files_to_upload:
