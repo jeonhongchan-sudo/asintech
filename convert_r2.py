@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 import math
 import subprocess
 import boto3
@@ -514,6 +515,14 @@ def upload_to_r2(project_id, cache_control, source_crs):
         print(f"Upload process failed: {e}")
         return False
 
+def sanitize_cad_text(s):
+    if not s: return ""
+    s = str(s).lower()
+    s = re.sub(r'\s+', '', s)
+    s = re.sub(r'%%[cdp]', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'[/\\-_.\(\)\[\]]', '', s)
+    return s
+
 def run_recalculation(project_id, dxf_path):
     """도면 갱신 시 기존 계산 정보(연장, 수량 등)를 자동으로 재계산하여 Supabase 업데이트"""
     supabase = get_supabase_client()
@@ -650,17 +659,69 @@ def run_recalculation(project_id, dxf_path):
         fac_info = details.get('facilities_info', {})
         f_headers = fac_info.get('headers', [])
         f_data = fac_info.get('data', [])
+        f_syns = fac_info.get('synonyms', [])
+        f_nd = fac_info.get('needs_diam', [])
+        f_excls_list = fac_info.get('exclusions', [])
+
         idx_f_name, idx_f_qty = 0, next((i for i, h in enumerate(f_headers) if h and "수량" in str(h)), -1) # '수량' 헤더 인덱스
         idx_f_diam = next((i for i, h in enumerate(f_headers) if h and "관경" in str(h)), -1) # '관경' 헤더 인덱스
+        idx_f_meta = next((i for i, h in enumerate(f_headers) if h == "_layers"), -1) # '_layers' 헤더 인덱스
         
         if idx_f_qty != -1:
-            all_texts = [e.dxf.text if e.dxftype() == 'TEXT' else (e.plain_text() if hasattr(e, 'plain_text') else e.text) 
-                         for e in list(msp.query('TEXT')) + list(msp.query('MTEXT'))]
+            # [수정] 블록 내부 텍스트까지 포함하여 재계산 (동기화)
+            all_entities = list(msp.query('TEXT MTEXT'))
+            for insert in msp.query('INSERT'):
+                all_entities.extend([e for e in insert.virtual_entities() if e.dxftype() in ('TEXT', 'MTEXT')])
+            
+            # 텍스트와 레이어 정보를 쌍으로 저장
+            all_text_data = []
+            for e in all_entities:
+                txt = e.dxf.text if e.dxftype() == 'TEXT' else (e.plain_text() if hasattr(e, 'plain_text') else e.text)
+                all_text_data.append((sanitize_cad_text(txt), e.dxf.layer.upper()))
+            
             for i, row in enumerate(f_data):
                 row = list(row)
                 name = str(row[idx_f_name]).strip()
                 diam = str(row[idx_f_diam]).strip() if idx_f_diam != -1 else ""
-                if name: row[idx_f_qty] = str(sum(1 for t in all_texts if name in t and (not diam or diam in t) and "하단" not in t))
+                
+                # 해당 행의 설정값 가져오기
+                syn_str = f_syns[i] if i < len(f_syns) else ""
+                needs_diam = f_nd[i] if i < len(f_nd) else True
+                excl_str = f_excls_list[i] if i < len(f_excls_list) else "하단"
+
+                # 검색어 및 제외어 리스트 구성
+                keywords = [name] + [s.strip() for s in syn_str.split(',') if s.strip()]
+                exclusions = [ex.strip() for ex in excl_str.split(',') if ex.strip()]
+                if "하단" not in exclusions: exclusions.append("하단")
+                
+                # 레이어 필터 확인
+                layers = []
+                if idx_f_meta != -1 and idx_f_meta < len(row):
+                    layers = [l.strip().upper() for l in str(row[idx_f_meta]).split(',') if l.strip()]
+                
+                s_names = [sanitize_cad_text(k) for k in keywords]
+                s_diam = sanitize_cad_text(diam)
+                s_excls = [sanitize_cad_text(ex) for ex in exclusions]
+                
+                if s_names[0]: # 기본 이름이 있는 경우만 진행
+                    count = 0
+                    for t_val, t_layer in all_text_data:
+                        # 레이어 필터가 있으면 레이어 체크, 없으면 전체 통과
+                        if layers and t_layer not in layers: continue
+                        
+                        # [검색 논리] 1. 제외어 체크
+                        if any(ex in t_val for ex in s_excls): continue
+                        
+                        # [개선] 2. 웹/UI와 동일하게 이름+관경 결합 패턴으로 검색
+                        if needs_diam and s_diam:
+                            search_patterns = [sanitize_cad_text(kw + diam) for kw in keywords]
+                            has_match = any(pat in t_val for pat in search_patterns)
+                        else:
+                            has_match = any(sn in t_val for sn in s_names)
+                        
+                        if has_match:
+                            count += 1
+                    row[idx_f_qty] = str(count)
                 f_data[i] = row
 
         # 3. Supabase 업데이트
