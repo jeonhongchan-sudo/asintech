@@ -391,7 +391,6 @@ def convert_to_pmtiles():
         "tippecanoe",
         "-o", "output.pmtiles",
         "-z22",
-        "-p", # [추가] 최대 정밀도 유지 (Full detail)
         "--drop-densest-as-needed",
         "--extend-zooms-if-still-dropping",
         "--force",
