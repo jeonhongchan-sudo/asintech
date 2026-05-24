@@ -686,7 +686,9 @@ def run_recalculation(project_id, dxf_path):
                 
                 # 해당 행의 설정값 가져오기
                 syn_str = f_syns[i] if i < len(f_syns) else ""
-                needs_diam = f_nd[i] if i < len(f_nd) else True
+                # [수정] DB의 null(None) 값 대응 및 UI 로직(default=True)과 동기화
+                val_nd = f_nd[i] if i < len(f_nd) else True
+                needs_diam = True if val_nd is None else bool(val_nd)
                 excl_str = f_excls_list[i] if i < len(f_excls_list) else "하단"
 
                 # 검색어 및 제외어 리스트 구성
@@ -699,27 +701,25 @@ def run_recalculation(project_id, dxf_path):
                 if idx_f_meta != -1 and idx_f_meta < len(row):
                     layers = [l.strip().upper() for l in str(row[idx_f_meta]).split(',') if l.strip()]
                 
-                s_names = [sanitize_cad_text(k) for k in keywords]
-                s_diam = sanitize_cad_text(diam)
                 s_excls = [sanitize_cad_text(ex) for ex in exclusions]
                 
-                if s_names[0]: # 기본 이름이 있는 경우만 진행
+                # [수정] 검색 패턴 생성 로직을 UI와 완벽하게 동기화 (이름+관경 결합)
+                if needs_diam and diam:
+                    search_patterns = [sanitize_cad_text(kw + diam) for kw in keywords]
+                else:
+                    search_patterns = [sanitize_cad_text(kw) for kw in keywords]
+                
+                if keywords[0]: # 기본 시설물명이 있는 경우만 진행
                     count = 0
                     for t_val, t_layer in all_text_data:
                         # 레이어 필터가 있으면 레이어 체크, 없으면 전체 통과
                         if layers and t_layer not in layers: continue
                         
-                        # [검색 논리] 1. 제외어 체크
+                        # [검색 논리] 1. 제외어 체크 (하나라도 포함되면 제외)
                         if any(ex in t_val for ex in s_excls): continue
                         
-                        # [개선] 2. 웹/UI와 동일하게 이름+관경 결합 패턴으로 검색
-                        if needs_diam and s_diam:
-                            search_patterns = [sanitize_cad_text(kw + diam) for kw in keywords]
-                            has_match = any(pat in t_val for pat in search_patterns)
-                        else:
-                            has_match = any(sn in t_val for sn in s_names)
-                        
-                        if has_match:
+                        # [검색 논리] 2. 이름(+관경) 패턴 매칭
+                        if any(pat in t_val for pat in search_patterns):
                             count += 1
                     row[idx_f_qty] = str(count)
                 f_data[i] = row
