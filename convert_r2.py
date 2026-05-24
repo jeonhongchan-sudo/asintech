@@ -391,12 +391,14 @@ def convert_to_pmtiles():
         "tippecanoe",
         "-o", "output.pmtiles",
         "-z22",
+        "-p", # [추가] 최대 정밀도 유지 (Full detail)
         "--drop-densest-as-needed",
         "--extend-zooms-if-still-dropping",
         "--force",
         "--no-line-simplification",
         "--no-tiny-polygon-reduction",
-        "-r1"
+        "--preserve-all-properties", # [추가] 모든 속성(handle 등) 보존 강제
+        "-r1" # 포인트 누락 방지
     ]
     
     has_input = False
