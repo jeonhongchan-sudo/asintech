@@ -1,0 +1,27 @@
+name: Auto Knowledge Embedding
+
+on:
+  schedule:
+    - cron: '0 18 * * *' # 한국 시간 기준 매일 새벽 3시 자동 실행
+  workflow_dispatch:      # 사용자가 GitHub 대시보드에서 수동으로 실행 가능
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          
+      - name: Install dependencies
+        run: |
+          pip install sentence-transformers supabase
+          
+      - name: Run Auto Embedding
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/auto_embed.py
