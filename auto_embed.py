@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+import time
 import requests
 from supabase import create_client
 
@@ -14,18 +15,27 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # [추가] 구글 API 키 필요
 
-def get_gemini_embedding(text):
-    """구글 Gemini API를 사용하여 768차원 임베딩 생성"""
+def get_gemini_embedding(text, max_retries=3):
+    """구글 Gemini API를 사용하여 768차원 임베딩 생성 (429 에러 시 재시도 로직 포함)"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key={GEMINI_API_KEY}"
     payload = {
         "model": "models/gemini-embedding-001",
         "content": {"parts": [{"text": text}]}
     }
-    res = requests.post(url, json=payload)
-    if res.status_code == 200:
-        return res.json()['embedding']['values']
-    else:
-        raise Exception(f"Gemini API Error: {res.text}")
+    
+    for attempt in range(max_retries):
+        res = requests.post(url, json=payload)
+        if res.status_code == 200:
+            return res.json()['embedding']['values']
+        elif res.status_code == 429:
+            # 무료 티어는 분당 요청 제한이 엄격하므로, 60초 이상 대기 후 재시도합니다.
+            wait_time = 60 * (attempt + 1)
+            print(f"    - [!] Rate Limit (429) 발생. {wait_time}초 대기 후 재시도 ({attempt + 1}/{max_retries})...")
+            time.sleep(wait_time)
+        else:
+            raise Exception(f"Gemini API Error: {res.text}")
+            
+    raise Exception(f"최대 재시도 횟수({max_retries})를 초과했습니다. API 할당량을 확인하세요.")
 
 def run_auto_embedding():
     if not all([SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY]):
@@ -54,6 +64,10 @@ def run_auto_embedding():
                 # 3. DB 업데이트
                 supabase_client.table("pdf_knowledge").update({"embedding": vector}).eq("id", item['id']).execute()
                 print(f"    - ID {item['id']} 처리 완료")
+                
+                # API 안정성을 위해 요청 사이에 짧은 지연 시간(2초) 추가
+                # (Gemini 무료 티어: 분당 약 15회 요청 제한 대응)
+                time.sleep(2)
             except Exception as e:
                 print(f"    - [!] ID {item['id']} 처리 중 오류: {e}")
 
