@@ -19,11 +19,11 @@ jobs:
           
       - name: Install dependencies
         run: |
-          pip install sentence-transformers supabase
+          pip install sentence-transformers supabase requests
           
       - name: Run Auto Embedding
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # 추가: Gemini API 키 전달
-        run: python scripts/auto_embed.py
+        run: python auto_embed.py
