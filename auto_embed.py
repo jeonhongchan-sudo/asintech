@@ -1,7 +1,13 @@
 import os
 import sys
+import io
 import requests
 from supabase import create_client
+
+# 1. 한글 인코딩 에러 ('ascii' codec) 방지를 위한 스트림 설정
+# 특히 한글이 포함된 로그를 출력할 때 발생할 수 있는 오류를 차단합니다.
+sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
 # GitHub Secrets 환경 변수
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
