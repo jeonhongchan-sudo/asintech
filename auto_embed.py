@@ -36,14 +36,16 @@ def run_auto_embedding():
 
         # 1. 임베딩이 비어있는(null) 데이터 조회
         print("[*] 임베딩 작업이 필요한 데이터 조회 중...")
-        res = supabase_client.table("pdf_knowledge").select("id, content").is_("embedding", "null").execute()
+        # 'is.null' 필터를 명확히 사용하고, 최대 100건씩 끊어서 처리 (안정성)
+        res = supabase_client.table("pdf_knowledge").select("id, content").is_("embedding", "null").limit(100).execute()
         targets = res.data
 
         if not targets:
-            print("[✔] 모든 데이터가 업데이트되어 있습니다.")
+            print("[✔] 업데이트할 대상이 없습니다. (조회 결과 0건)")
+            # 실제로 데이터가 있는데 0건이 나온다면 SUPABASE_KEY가 service_role 인지 확인 필요
             return
 
-        print(f"[+] 총 {len(targets)}건의 누락된 벡터를 생성합니다 (로컬 엔진 - 무제한)...")
+        print(f"[+] 총 {len(targets)}건의 누락된 데이터를 처리합니다.")
 
         for item in targets:
             try:
@@ -51,8 +53,12 @@ def run_auto_embedding():
                 vector = get_local_embedding(item['content'])
                 
                 # 3. DB 업데이트
-                supabase_client.table("pdf_knowledge").update({"embedding": vector}).eq("id", item['id']).execute()
-                print(f"    - ID {item['id']} 처리 완료")
+                update_res = supabase_client.table("pdf_knowledge").update({"embedding": vector}).eq("id", item['id']).execute()
+                
+                if len(update_res.data) > 0:
+                    print(f"    - ID {item['id']} 업데이트 완료")
+                else:
+                    print(f"    - [⚠️] ID {item['id']} 업데이트 실패 (권한 또는 RLS 문제 가능성)")
                 
                 # 로컬 작업이므로 지연 시간(sleep)이 필요 없으나, DB 부하를 위해 0.1초만 대기
                 time.sleep(0.1)

@@ -20,10 +20,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests supabase sentence-transformers torch --no-cache-dir
+          pip install requests supabase sentence-transformers torch postgrest --no-cache-dir
 
       - name: Run Embedding Script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python asintech(Github_Action, 배포 폴더)/auto_embed.py
+        # 경로에 공백/괄호가 있으므로 큰따옴표로 감싸서 실행합니다.
+        run: python "asintech(Github_Action, 배포 폴더)/auto_embed.py"
