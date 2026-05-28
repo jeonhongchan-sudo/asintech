@@ -17,11 +17,11 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 # 로컬 임베딩 모델 로드 (다국어 지원: 한국어, 영어 등)
 # 최초 실행 시 모델을 다운로드하며, 이후에는 로컬 캐시를 사용합니다.
-print("[*] 로컬 임베딩 엔진(Multilingual MPNet) 로드 중...")
-model = SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
+print("[*] 384차원 로컬 임베딩 엔진(Multilingual MiniLM) 로드 중...")
+model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 
 def get_local_embedding(text):
-    """로컬 엔진을 사용하여 768차원 임베딩 생성 (API 키 불필요)"""
+    """로컬 엔진을 사용하여 384차원 임베딩 생성 (API 키 불필요)"""
     # 한글/영문 텍스트를 벡터로 변환
     embedding = model.encode(text)
     return embedding.tolist()
