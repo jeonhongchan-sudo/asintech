@@ -11,3 +11,5 @@ __pycache__/
 *.json
 *.pmtiles
 temp_*.geojson
+auto_embed.py
+auto_embedding.yml
