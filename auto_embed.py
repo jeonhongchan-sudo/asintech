@@ -37,7 +37,7 @@ def run_auto_embedding():
         # 1. 임베딩이 비어있는(null) 데이터 조회
         print("[*] 임베딩 작업이 필요한 데이터 조회 중...")
         # 'is.null' 필터를 명확히 사용하고, 최대 100건씩 끊어서 처리 (안정성)
-        res = supabase_client.table("pdf_knowledge").select("id, content").is_("embedding", "null").limit(100).execute()
+        res = supabase_client.table("pdf_knowledge").select("id, content, content_url").is_("embedding", "null").limit(100).execute()
         targets = res.data
 
         if not targets:
@@ -49,8 +49,15 @@ def run_auto_embedding():
 
         for item in targets:
             try:
+                # [하이브리드] DB에 텍스트가 없으면 URL에서 가져오기
+                text_to_embed = item.get('content')
+                if not text_to_embed and item.get('content_url'):
+                    resp = requests.get(item['content_url'])
+                    if resp.ok:
+                        text_to_embed = resp.json().get('content')
+
                 # 2. 로컬 엔진으로 벡터 생성
-                vector = get_local_embedding(item['content'])
+                vector = get_local_embedding(text_to_embed) if text_to_embed else None
                 
                 # 3. DB 업데이트
                 update_res = supabase_client.table("pdf_knowledge").update({"embedding": vector}).eq("id", item['id']).execute()
