@@ -3,7 +3,7 @@ name: Auto Knowledge Embedding
 
 on:
   schedule:
-    - cron: '0 18 * * *' # 한국 시간 기준 매일 새벽 3시 자동 실행
+    - cron: '30 0/3 * * *' # UTC 0:30부터 3시간마다 실행 (0:30, 3:30, 6:30...)
   workflow_dispatch:      # 사용자가 GitHub 대시보드에서 수동으로 실행 가능
 
 jobs:
