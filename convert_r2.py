@@ -371,13 +371,15 @@ def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None,
         print(f"GeoJSON conversion error: {e}")
         return False
 
-def convert_spatial_to_geojson(input_path, source_crs):
+def convert_spatial_to_geojson(input_path, source_crs, append=False):
     """ogr2ogr를 사용하여 공간 데이터(SHP, GeoJSON 등)를 GeoJSON(EPSG:4326)으로 변환"""
-    print(f"Converting spatial data {input_path} to GeoJSON (Source CRS: {source_crs})...")
+    print(f"Converting spatial data {input_path} to GeoJSON (Source CRS: {source_crs}, Append: {append})...")
     try:
         output_path = "temp_combined.geojson"
         # Tippecanoe 변환을 위해 타겟 좌표계를 EPSG:4326으로 고정
         cmd = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", output_path, input_path]
+        if append:
+            cmd.insert(3, "-append") # 기존 파일이 있으면 데이터를 추가(병합)함
         
         # 원본 좌표계가 명시된 경우 추가
         if source_crs:
@@ -791,16 +793,18 @@ if __name__ == "__main__":
                 with zipfile.ZipFile("input.zip", 'r') as zip_ref:
                     zip_ref.extractall("temp_shp")
                 
-                # 압축 해제된 파일 중 .shp 찾기
-                target_shp = None
+                # 압축 해제된 파일 중 모든 .shp 찾기 (선/면/포인트 레이어가 별도인 경우 대응)
+                shp_files = []
                 for root, dirs, files in os.walk("temp_shp"):
                     for file in files:
                         if file.lower().endswith(".shp"):
-                            target_shp = os.path.join(root, file)
-                            break
+                            shp_files.append(os.path.join(root, file))
                 
-                if target_shp and convert_spatial_to_geojson(target_shp, source_crs):
-                    conversion_ready = True
+                if shp_files:
+                    for i, shp_path in enumerate(shp_files):
+                        # 첫 번째 파일은 생성, 두 번째부터는 기존 파일에 추가(append)
+                        if convert_spatial_to_geojson(shp_path, source_crs, append=(i > 0)):
+                            conversion_ready = True
         
         # 2. PMTiles 변환 및 업로드
         if conversion_ready:
