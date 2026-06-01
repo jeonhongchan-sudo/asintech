@@ -377,7 +377,9 @@ def convert_shp_to_dxf_server(shp_paths, dxf_path, layer_field='LAYER'):
         import shapefile
         print(f"Converting {len(shp_paths)} SHP files to a single DXF: {dxf_path}")
         
-        doc = ezdxf.new('R2000')
+        # [수정] R2007 이상 버전으로 설정하여 UTF-8 한글 처리 안정성 확보
+        doc = ezdxf.new('R2007')
+        doc.header['$DWGCODEPAGE'] = 'ANSI_949' # 한글 코드페이지 명시
         msp = doc.modelspace()
 
         for shp_path in shp_paths:
@@ -391,6 +393,14 @@ def convert_shp_to_dxf_server(shp_paths, dxf_path, layer_field='LAYER'):
             # 필드 인덱스 찾기
             fields = [f[0].upper() for f in sf.fields[1:]]
             layer_idx = fields.index(layer_field.upper()) if layer_field.upper() in fields else -1
+            
+            # [추가] 텍스트 라벨로 사용할 필드 찾기 (범용적인 TEXTSTRING 및 STRING 우선 검색)
+            text_idx = -1
+            for tf in ['TEXTSTRING', 'STRING', 'TEXT', 'NAME', 'LABEL', 'CNAME']:
+                if tf in fields:
+                    text_idx = fields.index(tf)
+                    print(f"     ℹ️ Found text label field: {tf}")
+                    break
             
             # 기본 레이어 이름 (필드가 없을 경우 파일명 사용)
             default_layer = os.path.splitext(os.path.basename(shp_path))[0]
@@ -408,7 +418,20 @@ def convert_shp_to_dxf_server(shp_paths, dxf_path, layer_field='LAYER'):
 
                 # 기하 타입별 변환
                 if shape.shapeType == shapefile.POINT:
-                    msp.add_point(shape.points[0], dxfattribs={'layer': layer_name})
+                    pt = shape.points[0]
+                    # 1. 포인트 객체 추가
+                    msp.add_point(pt, dxfattribs={'layer': layer_name})
+                    
+                    # 2. [추가] 텍스트 라벨 필드가 있다면 TEXT 객체로 추가 (웹에서 텍스트 시각화용)
+                    if text_idx != -1:
+                        text_val = str(record[text_idx]).strip()
+                        if text_val:
+                            # 웹 지도 가독성을 위해 적절한 높이(height) 설정
+                            msp.add_text(text_val, dxfattribs={
+                                'insert': pt,
+                                'layer': layer_name,
+                                'height': 2.0
+                            })
                 elif shape.shapeType in [shapefile.POLYLINE, shapefile.POLYLINEZ]:
                     parts = list(shape.parts) + [len(shape.points)]
                     for i in range(len(parts)-1):
