@@ -372,47 +372,74 @@ def dxf_to_geojson(project_id, source_crs, target_layers, geojson_layers, center
         return False
 
 def convert_spatial_to_geojson(input_path, source_crs, geojson_layers):
-    """ogr2ogr를 사용하여 공간 데이터를 분석하고 점/선/면 GeoJSON으로 분리 추출"""
-    print(f"Converting spatial data {input_path} to structured GeoJSON (Source CRS: {source_crs})...")
+    """ogr2ogr를 사용하여 공간 데이터를 분석하고 속성값(LAYER/layer)에 따라 레이어 분리 추출"""
+    print(f"Converting spatial data {input_path} (Source CRS: {source_crs})...")
     try:
         # SHP 파일인 경우 한글 깨짐 방지를 위해 인코딩 옵션 추가 (한국 공공 데이터 표준 CP949 적용)
         is_shp = input_path.lower().endswith(".shp")
         encoding_opt = ["-oo", "ENCODING=cp949"] if is_shp else []
         
-        # 1. 속성 테이블 분석: 'layer' 또는 'LAYER' 컬럼이 있는지 확인하고 고유값 추출
-        # ogrinfo를 사용하여 속성 필드 내의 유니크한 레이어 값들을 가져옵니다.
+        # 1. 속성 테이블 분석: 분류 필드(LAYER 또는 layer) 확인 및 고유값 추출
         unique_layers = []
+        found_field = None
         try:
             ds_name = os.path.splitext(os.path.basename(input_path))[0]
-            # SQL 쿼리로 고유한 레이어명 목록 조회
-            info_cmd = ["ogrinfo", "-ro", "-so", "-sql", f"SELECT DISTINCT \"layer\" FROM \"{ds_name}\"", input_path]
-            info_cmd += encoding_opt
-            info_res = subprocess.run(info_cmd, capture_output=True, text=True)
+            # 필드 목록을 먼저 확인하여 분류 기준 필드명(LAYER/layer) 파악
+            meta_cmd = ["ogrinfo", "-ro", "-so", input_path, ds_name]
+            meta_cmd += encoding_opt
+            meta_res = subprocess.run(meta_cmd, capture_output=True, text=True)
             
-            # 결과 파싱 (layer (String) = 값 형태 추출)
-            matches = re.findall(r"layer \(String\) = (.*)", info_res.stdout)
-            if not matches:
-                # 대문자 LAYER도 시도
-                info_cmd[4] = f"SELECT DISTINCT \"LAYER\" FROM \"{ds_name}\""
-                info_res = subprocess.run(info_cmd, capture_output=True, text=True)
-                matches = re.findall(r"LAYER \(String\) = (.*)", info_res.stdout)
-            
-            unique_layers = [m.strip() for m in matches if m.strip()]
+            # 대소문자 구분 없이 LAYER/layer 필드가 있는지 확인
+            match_field = re.search(r"\b(LAYER)\b", meta_res.stdout, re.IGNORECASE)
+            if match_field:
+                # 실제 출력된 필드명의 대소문자 확인 및 추출
+                field_lines = [l.strip() for l in meta_res.stdout.split('\n') if ':' in l and '(' in l]
+                for l in field_lines:
+                    f_name = l.split(':')[0].strip()
+                    if f_name.upper() == "LAYER":
+                        found_field = f_name
+                        break
+                
+                if found_field:
+                    print(f"  -> Found classification field: {found_field}")
+                    # SQL 쿼리로 고유한 레이어명 목록 조회
+                    info_cmd = ["ogrinfo", "-ro", "-so", "-sql", f"SELECT DISTINCT \"{found_field}\" FROM \"{ds_name}\"", input_path]
+                    info_cmd += encoding_opt
+                    info_res = subprocess.run(info_cmd, capture_output=True, text=True)
+                    
+                    # 결과 파싱 (FIELDNAME (Type) = 값 형태 추출)
+                    pattern = rf"\b{found_field}\s+\(\w+\)\s+=\s+(.*)"
+                    matches = re.findall(pattern, info_res.stdout, re.IGNORECASE)
+                    unique_layers = [m.strip() for m in matches if m.strip() and m.strip() != '<null>']
         except Exception as e:
             print(f"Attribute analysis failed: {e}")
 
-        # 2. 분류 로직: 고유 레이어값이 있다면 레이어별로 분리, 없다면 기하타입별로 분리
-        # 사용자께서 QGIS에서 경험하신 '분류' 효과를 PMTiles 레이어 구조로 변환합니다.
-        target_categories = []
+         # 2. 데이터 분리 추출 및 Tippecanoe 레이어 목록 구성
+        has_any = False
+
         if unique_layers:
-            print(f"Found unique layers in attributes: {unique_layers}")
-            for ul in unique_layers:
-                # 레이어명에 공백이나 특수문자가 있을 경우를 대비해 안전한 ID 생성
-                safe_name = re.sub(r'[^\w]', '_', ul)
-                target_categories.append((safe_name, f"\"layer\" = '{ul}' OR \"LAYER\" = '{ul}'"))
+            print(f"  -> Separating SHP into {len(unique_layers)} layers: {unique_layers}")
+            for val in unique_layers:
+                # 레이어 ID 생성 (파일 시스템 안전성 확보)
+                safe_id = re.sub(r'[^\w]', '_', val)
+                output_path = f"temp_{safe_id}.geojson"
+                
+                cmd = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", "-append", output_path, input_path]
+                cmd += encoding_opt
+                cmd += ["-where", f"\"{found_field}\" = '{val}'"]
+                if source_crs:
+                    cmd.extend(["-s_srs", source_crs])
+                
+                subprocess.run(cmd, check=False, stderr=subprocess.DEVNULL)
+                if os.path.exists(output_path):
+                    has_any = True
+                    # Tippecanoe 변환 목록에 추가 (레이어명은 원본 값 사용)
+                    if (val, output_path) not in geojson_layers:
+                        geojson_layers.append((val, output_path))
         else:
-            # 고유 속성이 없는 경우 기존처럼 기하 타입별로 기본 분류
-            target_categories = [
+           # 분류 필드가 없거나 분석 실패 시 기하 타입별로 기본 분류
+            print("  -> Classification field not found. Defaulting to geometry type classification.")
+            default_categories = [ 
                 ("point", "OGR_GEOMETRY='POINT' OR OGR_GEOMETRY='MULTIPOINT'"),
                 ("line", "OGR_GEOMETRY='LINESTRING' OR OGR_GEOMETRY='MULTILINESTRING'"),
                 ("polygon", "OGR_GEOMETRY='POLYGON' OR OGR_GEOMETRY='MULTIPOLYGON'")
@@ -424,23 +451,18 @@ def convert_spatial_to_geojson(input_path, source_crs, geojson_layers):
             ("polygon", "OGR_GEOMETRY='POLYGON' OR OGR_GEOMETRY='MULTIPOLYGON'")
         ]
 
-        has_any = False
-        
-        for layer_id, where_clause in target_categories:
-            output_path = f"temp_{layer_id}.geojson"
-            cmd = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", "-append", output_path, input_path]
-            cmd += encoding_opt
-            cmd += ["-where", where_clause]
-            if source_crs:
-                cmd.extend(["-s_srs", source_crs])
-            
-            # 변환 실행
-            subprocess.run(cmd, check=False, stderr=subprocess.DEVNULL)
-            if os.path.exists(output_path):
-                has_any = True
-                # Tippecanoe 변환 목록에 추가 (중복 방지)
-                if (layer_id, output_path) not in geojson_layers:
-                    geojson_layers.append((layer_id, output_path))
+        for layer_id, where_clause in default_categories:
+                output_path = f"temp_{layer_id}.geojson"
+                cmd = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", "-append", output_path, input_path]
+                cmd += encoding_opt
+                cmd += ["-where", where_clause]
+                if source_crs: cmd.extend(["-s_srs", source_crs])
+                
+                subprocess.run(cmd, check=False, stderr=subprocess.DEVNULL)
+                if os.path.exists(output_path):
+                    has_any = True
+                    if (layer_id, output_path) not in geojson_layers:
+                        geojson_layers.append((layer_id, output_path))
 
         # R2 보관용 통합 GeoJSON 파일도 생성 (모든 타입을 하나로)
         cmd_comb = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", "-append", "temp_combined.geojson", input_path]
