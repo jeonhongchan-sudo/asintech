@@ -371,6 +371,52 @@ def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None,
         print(f"GeoJSON conversion error: {e}")
         return False
 
+def convert_shp_to_dxf_server(shp_path, dxf_path, layer_field='LAYER'):
+    """SHP 파일을 읽어 지정된 필드를 레이어로 하는 DXF로 변환 (서버용)"""
+    try:
+        import shapefile
+        print(f"Converting SHP to DXF: {shp_path} -> {dxf_path}")
+        sf = shapefile.Reader(shp_path, encoding='cp949')
+        
+        # 필드 인덱스 찾기
+        fields = [f[0].upper() for f in sf.fields[1:]]
+        layer_idx = fields.index(layer_field.upper()) if layer_field.upper() in fields else -1
+        
+        doc = ezdxf.new('R2000')
+        msp = doc.modelspace()
+
+        for shape_rec in sf.shapeRecords():
+            shape = shape_rec.shape
+            record = shape_rec.record
+            
+            # 레이어 이름 결정
+            layer_name = str(record[layer_idx]).strip().replace(" ", "_") if layer_idx != -1 else "0"
+            if layer_name not in doc.layers:
+                doc.layers.new(name=layer_name)
+
+            # 기하 타입별 변환
+            if shape.shapeType == shapefile.POINT:
+                msp.add_point(shape.points[0], dxfattribs={'layer': layer_name})
+            elif shape.shapeType in [shapefile.POLYLINE, shapefile.POLYLINEZ]:
+                parts = list(shape.parts) + [len(shape.points)]
+                for i in range(len(parts)-1):
+                    pts = shape.points[parts[i]:parts[i+1]]
+                    if len(pts) >= 2:
+                        msp.add_lwpolyline(pts, dxfattribs={'layer': layer_name})
+            elif shape.shapeType in [shapefile.POLYGON, shapefile.POLYGONZ]:
+                parts = list(shape.parts) + [len(shape.points)]
+                for i in range(len(parts)-1):
+                    pts = shape.points[parts[i]:parts[i+1]]
+                    if len(pts) >= 3:
+                        msp.add_lwpolyline(pts, is_closed=True, dxfattribs={'layer': layer_name})
+
+        doc.saveas(dxf_path)
+        print("SHP to DXF pre-processing complete.")
+        return True
+    except Exception as e:
+        print(f"Error in SHP to DXF pre-processing: {e}")
+        return False
+
 def convert_to_pmtiles():
     """Tippecanoe를 사용하여 GeoJSON을 PMTiles로 변환"""
     print("Converting to PMTiles...")
@@ -751,9 +797,26 @@ if __name__ == "__main__":
         success = False
         
         # 1. 입력 타입에 따른 데이터 준비 (GeoJSON화)
-        if download_from_r2(f"cad_data/CAD_{project_id}.dxf", "input.dxf"):
-            if dxf_to_geojson(project_id, source_crs, layers, centerline_layer, reverse_chainage):
-                conversion_ready = True
+        if input_type == 'dxf':
+            if download_from_r2(f"cad_data/CAD_{project_id}.dxf", "input.dxf"):
+                if dxf_to_geojson(project_id, source_crs, layers, centerline_layer, reverse_chainage):
+                    conversion_ready = True
+        elif input_type == 'zip':
+            if download_from_r2(f"cad_data/CAD_{project_id}.zip", "input.zip"):
+                # 압축 해제 후 SHP 찾기
+                with zipfile.ZipFile("input.zip", 'r') as zip_ref:
+                    zip_ref.extractall("temp_shp")
+                
+                shp_path = None
+                for root, dirs, files in os.walk("temp_shp"):
+                    for f in files:
+                        if f.lower().endswith(".shp"):
+                            shp_path = os.path.join(root, f)
+                            break
+                # SHP -> DXF 변환 후 기존 DXF 처리 로직 실행
+                if shp_path and convert_shp_to_dxf_server(shp_path, "input.dxf"):
+                    if dxf_to_geojson(project_id, source_crs, layers, centerline_layer, reverse_chainage):
+                        conversion_ready = True
         
         # 2. PMTiles 변환 및 업로드
         if conversion_ready:

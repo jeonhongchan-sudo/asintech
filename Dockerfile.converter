@@ -20,7 +20,7 @@ RUN git clone https://github.com/felt/tippecanoe.git \
 # 4. 파이썬 의존성 라이브러리 설치
 # shapely, pyproj 등이 미리 설치되어 실행 시 0초가 걸립니다.
 RUN pip install --no-cache-dir \
-    ezdxf shapely pyproj boto3 requests supabase
+    ezdxf shapely pyproj boto3 requests supabase pyshp
 
 WORKDIR /app
 # 이제 이 이미지는 'tippecanoe'와 '모든 라이브러리'를 가진 무적의 환경이 됩니다.
