@@ -129,7 +129,7 @@ def get_chainage_details(line_geom, pt_geom, total_length, reverse=False):
         return f"{km}+{m:07.3f}/상행({direction_str})/{offset:.3f}"
     except:
         return None
-def dxf_to_geojson(project_id, source_crs, target_layers, geojson_layers, centerline_layer=None, reverse_chainage=False):
+def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None, reverse_chainage=False):
     """DXF 파일을 GeoJSON으로 변환 (pyproj 좌표계 변환 및 레이어 필터링 적용)"""
     print(f"Converting DXF to GeoJSON (CRS: {source_crs})...")
     print(f"Target Layers: {target_layers}")    
@@ -371,96 +371,7 @@ def dxf_to_geojson(project_id, source_crs, target_layers, geojson_layers, center
         print(f"GeoJSON conversion error: {e}")
         return False
 
-def convert_spatial_to_geojson(input_path, source_crs, geojson_layers):
-    """공간 데이터를 분석하여 속성값(LAYER) 혹은 기하 타입별로 레이어를 분리 추출"""
-    print(f"Analyzing spatial data: {input_path}")
-    try:
-        is_shp = input_path.lower().endswith(".shp")
-        encoding_opt = ["-oo", "ENCODING=cp949"] if is_shp else []
-        
-        unique_layers = []
-        found_field = None
-        ds_name = os.path.splitext(os.path.basename(input_path))[0]
-
-        # 1. 필드 정보 확인 (LAYER 필드 탐색)
-        try:
-            meta_cmd = ["ogrinfo", "-ro", "-so", input_path, ds_name]
-            meta_cmd += encoding_opt
-            meta_res = subprocess.run(meta_cmd, capture_output=True, text=True)
-            
-            # "LAYER :" 혹은 "layer :" 형태의 필드명을 찾습니다.
-            for line in meta_res.stdout.splitlines():
-                m = re.search(r"^\s*(LAYER)\s+:", line, re.IGNORECASE)
-                if m:
-                    found_field = line.split(':')[0].strip()
-                    break
-            
-            if found_field:
-                print(f"  -> Found classification field: {found_field}")
-                # 고유한 속성값 목록 추출
-                sql = f"SELECT DISTINCT \"{found_field}\" FROM \"{ds_name}\""
-                info_cmd = ["ogrinfo", "-ro", "-noextent", "-sql", sql, input_path]
-                info_cmd += encoding_opt
-                info_res = subprocess.run(info_cmd, capture_output=True, text=True)
-                
-                # "  found_field (Type) = Value" 패턴으로 값을 추출
-                pattern = rf"{found_field}\s+\(.*\)\s+=\s+(.*)"
-                for line in info_res.stdout.splitlines():
-                    match = re.search(pattern, line, re.IGNORECASE)
-                    if match:
-                        val = match.group(1).strip()
-                        if val and val != '<null>':
-                            unique_layers.append(val)
-                unique_layers = list(set(unique_layers)) # 유니크 값 정규화
-        except Exception as e:
-            print(f"Attribute analysis failed: {e}")
-
-        # 2. 작업 리스트(Target Categories) 구성
-        target_categories = []
-        if unique_layers:
-            print(f"  -> Classification Strategy: Attribute field '{found_field}' ({len(unique_layers)} values)")
-            for val in unique_layers:
-                # 파일명 및 레이어 ID로 사용할 안전한 이름 생성
-                safe_id = re.sub(r'[^\w]', '_', str(val))
-                target_categories.append((str(val), safe_id, f"\"{found_field}\" = '{val}'"))
-        else:
-            print("  -> Classification Strategy: Field not found. Using geometry types.")
-            target_categories = [
-                ("point", "point", "OGR_GEOMETRY='POINT' OR OGR_GEOMETRY='MULTIPOINT'"),
-                ("line", "line", "OGR_GEOMETRY='LINESTRING' OR OGR_GEOMETRY='MULTILINESTRING'"),
-                ("polygon", "polygon", "OGR_GEOMETRY='POLYGON' OR OGR_GEOMETRY='MULTIPOLYGON'")
-            ]
-
-        # 3. 데이터 분리 추출 실행 (ogr2ogr)
-        has_any = False
-        for layer_name, safe_id, where_clause in target_categories:
-            output_path = f"temp_{safe_id}.geojson"
-            cmd = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", "-append", output_path, input_path]
-            cmd += encoding_opt
-            cmd += ["-where", where_clause]
-            if source_crs:
-                cmd.extend(["-s_srs", source_crs])
-            
-            # 변환 실행
-            subprocess.run(cmd, check=False, stderr=subprocess.DEVNULL)
-            if os.path.exists(output_path):
-                has_any = True
-                # Tippecanoe 변환 목록에 추가 (레이어명은 원본 속성값 유지)
-                if (layer_name, output_path) not in geojson_layers:
-                    geojson_layers.append((layer_name, output_path))
-
-        # R2 보관용 통합 GeoJSON 파일도 생성 (모든 타입을 하나로)
-        cmd_comb = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", "-append", "temp_combined.geojson", input_path]
-        cmd_comb += encoding_opt
-        if source_crs: cmd_comb.extend(["-s_srs", source_crs])
-        subprocess.run(cmd_comb, check=False, stderr=subprocess.DEVNULL)
-            
-        return has_any
-    except Exception as e:
-        print(f"GDAL conversion error: {e}")
-        return False
-
-def convert_to_pmtiles(geojson_layers):
+def convert_to_pmtiles():
     """Tippecanoe를 사용하여 GeoJSON을 PMTiles로 변환"""
     print("Converting to PMTiles...")
     
@@ -477,10 +388,19 @@ def convert_to_pmtiles(geojson_layers):
     ]
     
     has_input = False
-    for layer_id, path in geojson_layers:
-        if os.path.exists(path):
-            cmd.extend(["-L", f"{layer_id}:{path}"])
-            has_input = True
+    if os.path.exists("temp_polygon.geojson"):
+        cmd.extend(["-L", "polygon:temp_polygon.geojson"])
+        has_input = True
+    if os.path.exists("temp_point.geojson"):
+        cmd.extend(["-L", "point:temp_point.geojson"])
+        has_input = True
+    if os.path.exists("temp_line.geojson"):
+        cmd.extend(["-L", "line:temp_line.geojson"])
+        has_input = True
+    
+    if not has_input and os.path.exists("temp_combined.geojson"):
+        cmd.extend(["-L", "data:temp_combined.geojson"])
+        has_input = True
 
     if not has_input:
         print("No GeoJSON input files found.")
@@ -829,50 +749,17 @@ if __name__ == "__main__":
         
         conversion_ready = False
         success = False
-        # Tippecanoe에 전달할 레이어 정보 목록 [(레이어명, 파일경로), ...]
-        geojson_layers = []
         
         # 1. 입력 타입에 따른 데이터 준비 (GeoJSON화)
-        if input_type == 'dxf':
-            if download_from_r2(f"cad_data/CAD_{project_id}.dxf", "input.dxf"):
-                if dxf_to_geojson(project_id, source_crs, layers, geojson_layers, centerline_layer, reverse_chainage):
-                    conversion_ready = True
-        
-        elif input_type == 'shp':
-            # Shapefile은 .shp, .shx, .dbf 필수 다운로드
-            download_ok = True
-            for ext in ['.shp', '.shx', '.dbf', '.prj']:
-                if not download_from_r2(f"cad_data/CAD_{project_id}{ext}", f"input{ext}"):
-                    if ext != '.prj': download_ok = False # prj는 없어도 시도 가능
-            
-            if download_ok and convert_spatial_to_geojson("input.shp", source_crs, geojson_layers):
+        if download_from_r2(f"cad_data/CAD_{project_id}.dxf", "input.dxf"):
+            if dxf_to_geojson(project_id, source_crs, layers, centerline_layer, reverse_chainage):
                 conversion_ready = True
-        
-        elif input_type == 'zip':
-            # 압축파일 형태의 Shapefile
-            if download_from_r2(f"cad_data/CAD_{project_id}.zip", "input.zip"):
-                with zipfile.ZipFile("input.zip", 'r') as zip_ref:
-                    zip_ref.extractall("temp_shp")
-                
-                # 압축 해제된 파일 중 모든 .shp 찾기 (선/면/포인트 레이어가 별도인 경우 대응)
-                shp_files = []
-                for root, dirs, files in os.walk("temp_shp"):
-                    for file in files:
-                        if file.lower().endswith(".shp"):
-                            shp_files.append(os.path.join(root, file))
-                
-                if shp_files:
-                    for shp_path in shp_files:
-                        if convert_spatial_to_geojson(shp_path, source_crs, geojson_layers):
-                            conversion_ready = True
         
         # 2. PMTiles 변환 및 업로드
         if conversion_ready:
-            if convert_to_pmtiles(geojson_layers):
+            if convert_to_pmtiles():
                 if upload_to_r2(project_id, cache_control, source_crs):
-                    # DXF 타입인 경우에만 도면 연장/수량 재계산 수행
-                    if input_type == 'dxf':
-                        run_recalculation(project_id, "input.dxf")
+                    run_recalculation(project_id, "input.dxf")
                     success = True
 
         if success:
