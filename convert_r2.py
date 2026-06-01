@@ -371,22 +371,43 @@ def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None,
         print(f"GeoJSON conversion error: {e}")
         return False
 
-def convert_spatial_to_geojson(input_path, source_crs, append=False):
-    """ogr2ogr를 사용하여 공간 데이터(SHP, GeoJSON 등)를 GeoJSON(EPSG:4326)으로 변환"""
-    print(f"Converting spatial data {input_path} to GeoJSON (Source CRS: {source_crs}, Append: {append})...")
+def convert_spatial_to_geojson(input_path, source_crs):
+    """ogr2ogr를 사용하여 공간 데이터를 분석하고 점/선/면 GeoJSON으로 분리 추출"""
+    print(f"Converting spatial data {input_path} to structured GeoJSON (Source CRS: {source_crs})...")
     try:
-        output_path = "temp_combined.geojson"
-        # Tippecanoe 변환을 위해 타겟 좌표계를 EPSG:4326으로 고정
-        cmd = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", output_path, input_path]
-        if append:
-            cmd.insert(3, "-append") # 기존 파일이 있으면 데이터를 추가(병합)함
-        
-        # 원본 좌표계가 명시된 경우 추가
-        if source_crs:
-            cmd.extend(["-s_srs", source_crs])
+        # SHP 파일인 경우 한글 깨짐 방지를 위해 인코딩 옵션 추가 (한국 공공 데이터 표준 CP949 적용)
+        is_shp = input_path.lower().endswith(".shp")
+        open_options = ["-oo", "ENCODING=cp949"] if is_shp else []
+
+        # MapView 클라이언트가 기대하는 레이어 이름(point, line, polygon)에 맞춰 분리 추출
+        # -append를 사용하여 ZIP 내의 여러 SHP 파일 데이터를 누적함
+        geom_types = [
+            ("point", "OGR_GEOMETRY='POINT' OR OGR_GEOMETRY='MULTIPOINT'"),
+            ("line", "OGR_GEOMETRY='LINESTRING' OR OGR_GEOMETRY='MULTILINESTRING'"),
+            ("polygon", "OGR_GEOMETRY='POLYGON' OR OGR_GEOMETRY='MULTIPOLYGON'")
+        ]
+
+        has_any = False
+        for prefix, where_clause in geom_types:
+            output_path = f"temp_{prefix}.geojson"
+            cmd = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", "-append", output_path, input_path]
+            cmd += open_options
+            cmd += ["-where", where_clause]
+            if source_crs:
+                cmd.extend(["-s_srs", source_crs])
             
-        subprocess.run(cmd, check=True)
-        return os.path.exists(output_path)
+            # 특정 타입의 데이터가 없을 경우 경고가 발생할 수 있으므로 stderr 무시
+            subprocess.run(cmd, check=False, stderr=subprocess.DEVNULL)
+            if os.path.exists(output_path):
+                has_any = True
+        
+        # R2 보관용 통합 GeoJSON 파일도 생성 (모든 타입을 하나로)
+        cmd_comb = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", "-append", "temp_combined.geojson", input_path]
+        cmd_comb += open_options
+        if source_crs: cmd_comb.extend(["-s_srs", source_crs])
+        subprocess.run(cmd_comb, check=False, stderr=subprocess.DEVNULL)
+            
+        return has_any
     except Exception as e:
         print(f"GDAL conversion error: {e}")
         return False
@@ -801,9 +822,8 @@ if __name__ == "__main__":
                             shp_files.append(os.path.join(root, file))
                 
                 if shp_files:
-                    for i, shp_path in enumerate(shp_files):
-                        # 첫 번째 파일은 생성, 두 번째부터는 기존 파일에 추가(append)
-                        if convert_spatial_to_geojson(shp_path, source_crs, append=(i > 0)):
+                    for shp_path in shp_files:
+                        if convert_spatial_to_geojson(shp_path, source_crs):
                             conversion_ready = True
         
         # 2. PMTiles 변환 및 업로드
