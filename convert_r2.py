@@ -129,7 +129,7 @@ def get_chainage_details(line_geom, pt_geom, total_length, reverse=False):
         return f"{km}+{m:07.3f}/상행({direction_str})/{offset:.3f}"
     except:
         return None
-def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None, reverse_chainage=False):
+def dxf_to_geojson(project_id, source_crs, target_layers, geojson_layers, centerline_layer=None, reverse_chainage=False):
     """DXF 파일을 GeoJSON으로 변환 (pyproj 좌표계 변환 및 레이어 필터링 적용)"""
     print(f"Converting DXF to GeoJSON (CRS: {source_crs})...")
     print(f"Target Layers: {target_layers}")    
@@ -371,7 +371,7 @@ def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None,
         print(f"GeoJSON conversion error: {e}")
         return False
 
-def convert_spatial_to_geojson(input_path, source_crs):
+def convert_spatial_to_geojson(input_path, source_crs, geojson_layers):
     """ogr2ogr를 사용하여 공간 데이터를 분석하고 점/선/면 GeoJSON으로 분리 추출"""
     print(f"Converting spatial data {input_path} to structured GeoJSON (Source CRS: {source_crs})...")
     try:
