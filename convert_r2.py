@@ -371,44 +371,54 @@ def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None,
         print(f"GeoJSON conversion error: {e}")
         return False
 
-def convert_shp_to_dxf_server(shp_path, dxf_path, layer_field='LAYER'):
-    """SHP 파일을 읽어 지정된 필드를 레이어로 하는 DXF로 변환 (서버용)"""
+def convert_shp_to_dxf_server(shp_paths, dxf_path, layer_field='LAYER'):
+    """여러 SHP 파일을 읽어 하나의 DXF로 병합 변환 (서버용)"""
     try:
         import shapefile
-        print(f"Converting SHP to DXF: {shp_path} -> {dxf_path}")
-        sf = shapefile.Reader(shp_path, encoding='cp949')
-        
-        # 필드 인덱스 찾기
-        fields = [f[0].upper() for f in sf.fields[1:]]
-        layer_idx = fields.index(layer_field.upper()) if layer_field.upper() in fields else -1
+        print(f"Converting {len(shp_paths)} SHP files to a single DXF: {dxf_path}")
         
         doc = ezdxf.new('R2000')
         msp = doc.modelspace()
 
-        for shape_rec in sf.shapeRecords():
-            shape = shape_rec.shape
-            record = shape_rec.record
-            
-            # 레이어 이름 결정
-            layer_name = str(record[layer_idx]).strip().replace(" ", "_") if layer_idx != -1 else "0"
-            if layer_name not in doc.layers:
-                doc.layers.new(name=layer_name)
+        for shp_path in shp_paths:
+            print(f"  -> Processing: {os.path.basename(shp_path)}")
+            try:
+                sf = shapefile.Reader(shp_path, encoding='cp949')
+            except Exception as e:
+                print(f"     ❌ Failed to read {shp_path}: {e}")
+                continue
 
-            # 기하 타입별 변환
-            if shape.shapeType == shapefile.POINT:
-                msp.add_point(shape.points[0], dxfattribs={'layer': layer_name})
-            elif shape.shapeType in [shapefile.POLYLINE, shapefile.POLYLINEZ]:
-                parts = list(shape.parts) + [len(shape.points)]
-                for i in range(len(parts)-1):
-                    pts = shape.points[parts[i]:parts[i+1]]
-                    if len(pts) >= 2:
-                        msp.add_lwpolyline(pts, dxfattribs={'layer': layer_name})
-            elif shape.shapeType in [shapefile.POLYGON, shapefile.POLYGONZ]:
-                parts = list(shape.parts) + [len(shape.points)]
-                for i in range(len(parts)-1):
-                    pts = shape.points[parts[i]:parts[i+1]]
-                    if len(pts) >= 3:
-                        msp.add_lwpolyline(pts, is_closed=True, dxfattribs={'layer': layer_name})
+            # 필드 인덱스 찾기
+            fields = [f[0].upper() for f in sf.fields[1:]]
+            layer_idx = fields.index(layer_field.upper()) if layer_field.upper() in fields else -1
+            
+            # 기본 레이어 이름 (필드가 없을 경우 파일명 사용)
+            default_layer = os.path.splitext(os.path.basename(shp_path))[0]
+
+            for shape_rec in sf.shapeRecords():
+                shape = shape_rec.shape
+                record = shape_rec.record
+                
+                # 레이어 이름 결정: 필드값 우선, 없으면 파일명
+                layer_name = str(record[layer_idx]).strip().replace(" ", "_") if layer_idx != -1 else default_layer
+                if not layer_name or layer_name.lower() == 'none': layer_name = default_layer
+                
+                if layer_name not in doc.layers:
+                    doc.layers.new(name=layer_name)
+
+                # 기하 타입별 변환
+                if shape.shapeType == shapefile.POINT:
+                    msp.add_point(shape.points[0], dxfattribs={'layer': layer_name})
+                elif shape.shapeType in [shapefile.POLYLINE, shapefile.POLYLINEZ]:
+                    parts = list(shape.parts) + [len(shape.points)]
+                    for i in range(len(parts)-1):
+                        pts = shape.points[parts[i]:parts[i+1]]
+                        if len(pts) >= 2: msp.add_lwpolyline(pts, dxfattribs={'layer': layer_name})
+                elif shape.shapeType in [shapefile.POLYGON, shapefile.POLYGONZ]:
+                    parts = list(shape.parts) + [len(shape.points)]
+                    for i in range(len(parts)-1):
+                        pts = shape.points[parts[i]:parts[i+1]]
+                        if len(pts) >= 3: msp.add_lwpolyline(pts, is_closed=True, dxfattribs={'layer': layer_name})
 
         doc.saveas(dxf_path)
         print("SHP to DXF pre-processing complete.")
@@ -807,14 +817,14 @@ if __name__ == "__main__":
                 with zipfile.ZipFile("input.zip", 'r') as zip_ref:
                     zip_ref.extractall("temp_shp")
                 
-                shp_path = None
+                shp_files = []
                 for root, dirs, files in os.walk("temp_shp"):
                     for f in files:
                         if f.lower().endswith(".shp"):
-                            shp_path = os.path.join(root, f)
-                            break
-                # SHP -> DXF 변환 후 기존 DXF 처리 로직 실행
-                if shp_path and convert_shp_to_dxf_server(shp_path, "input.dxf"):
+                            shp_files.append(os.path.join(root, f))
+                
+                # 모든 SHP 파일을 하나의 DXF로 병합 변환
+                if shp_files and convert_shp_to_dxf_server(shp_files, "input.dxf"):
                     if dxf_to_geojson(project_id, source_crs, layers, centerline_layer, reverse_chainage):
                         conversion_ready = True
         
