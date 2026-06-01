@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     libsqlite3-dev \
     zlib1g-dev \
     git \
+    gdal-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # 3. Tippecanoe 소스 다운로드 및 컴파일 (이미지에 포함됨)

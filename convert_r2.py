@@ -4,6 +4,7 @@ import json
 import re
 import math
 import subprocess
+import zipfile
 import boto3
 import requests
 from datetime import datetime, timedelta, timezone
@@ -72,32 +73,17 @@ def get_r2_client():
         config=Config(signature_version='s3v4')
     )
 
-def download_dxf_from_r2(project_id):
-    """R2에서 DXF 파일 다운로드"""
-    print(f"Downloading DXF for Project {project_id} from R2...")
+def download_from_r2(key, local_path):
+    """R2에서 파일 다운로드 (공통)"""
+    print(f"Downloading {key} to {local_path} from R2...")
     s3 = get_r2_client()
-    key = f"cad_data/CAD_{project_id}.dxf"
     
     try:
-        s3.download_file(R2_BUCKET_NAME, key, "input.dxf")
-        print("DXF Download complete.")
+        s3.download_file(R2_BUCKET_NAME, key, local_path)
+        print(f"Download complete: {local_path}")
         return True
     except Exception as e:
-        print(f"Error downloading DXF: {e}")
-        return False
-
-def download_json_from_r2(project_id):
-    """R2에서 JSON 파일 다운로드"""
-    print(f"Downloading JSON for Project {project_id} from R2...")
-    s3 = get_r2_client()
-    key = f"cad_data/CAD_{project_id}.json"
-    
-    try:
-        s3.download_file(R2_BUCKET_NAME, key, "input.json")
-        print("JSON Download complete.")
-        return True
-    except Exception as e:
-        print(f"Error downloading JSON: {e}")
+        print(f"Error downloading {key}: {e}")
         return False
 
 def get_chainage_details(line_geom, pt_geom, total_length, reverse=False):
@@ -385,6 +371,24 @@ def dxf_to_geojson(project_id, source_crs, target_layers, centerline_layer=None,
         print(f"GeoJSON conversion error: {e}")
         return False
 
+def convert_spatial_to_geojson(input_path, source_crs):
+    """ogr2ogr를 사용하여 공간 데이터(SHP, GeoJSON 등)를 GeoJSON(EPSG:4326)으로 변환"""
+    print(f"Converting spatial data {input_path} to GeoJSON (Source CRS: {source_crs})...")
+    try:
+        output_path = "temp_combined.geojson"
+        # Tippecanoe 변환을 위해 타겟 좌표계를 EPSG:4326으로 고정
+        cmd = ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", output_path, input_path]
+        
+        # 원본 좌표계가 명시된 경우 추가
+        if source_crs:
+            cmd.extend(["-s_srs", source_crs])
+            
+        subprocess.run(cmd, check=True)
+        return os.path.exists(output_path)
+    except Exception as e:
+        print(f"GDAL conversion error: {e}")
+        return False
+
 def convert_to_pmtiles():
     """Tippecanoe를 사용하여 GeoJSON을 PMTiles로 변환"""
     print("Converting to PMTiles...")
@@ -411,7 +415,12 @@ def convert_to_pmtiles():
     if os.path.exists("temp_line.geojson"):
         cmd.extend(["-L", "line:temp_line.geojson"])
         has_input = True
-        
+    
+    # SHP/GeoJSON 입력으로 생성된 통합 파일 처리 (DXF가 아닐 때)
+    if not has_input and os.path.exists("temp_combined.geojson"):
+        cmd.extend(["-L", "data:temp_combined.geojson"])
+        has_input = True
+
     if not has_input:
         print("No GeoJSON input files found.")
         return False
@@ -757,22 +766,61 @@ if __name__ == "__main__":
         
         print(f"Starting conversion for Project {project_id} (Type: {input_type})")
         
+        conversion_ready = False
         success = False
         
-        if download_dxf_from_r2(project_id):
-            if dxf_to_geojson(project_id, source_crs, layers, centerline_layer, reverse_chainage):
-                if convert_to_pmtiles():
-                    if upload_to_r2(project_id, cache_control, source_crs):
-                        run_recalculation(project_id, "input.dxf") # 업로드 성공 후 자동 재계산 수행
-                        success = True
+        # 1. 입력 타입에 따른 데이터 준비 (GeoJSON화)
+        if input_type == 'dxf':
+            if download_from_r2(f"cad_data/CAD_{project_id}.dxf", "input.dxf"):
+                if dxf_to_geojson(project_id, source_crs, layers, centerline_layer, reverse_chainage):
+                    conversion_ready = True
+        
+        elif input_type == 'shp':
+            # Shapefile은 .shp, .shx, .dbf 필수 다운로드
+            download_ok = True
+            for ext in ['.shp', '.shx', '.dbf', '.prj']:
+                if not download_from_r2(f"cad_data/CAD_{project_id}{ext}", f"input{ext}"):
+                    if ext != '.prj': download_ok = False # prj는 없어도 시도 가능
+            
+            if download_ok and convert_spatial_to_geojson("input.shp", source_crs):
+                conversion_ready = True
+        
+        elif input_type == 'zip':
+            # 압축파일 형태의 Shapefile
+            if download_from_r2(f"cad_data/CAD_{project_id}.zip", "input.zip"):
+                with zipfile.ZipFile("input.zip", 'r') as zip_ref:
+                    zip_ref.extractall("temp_shp")
+                
+                # 압축 해제된 파일 중 .shp 찾기
+                target_shp = None
+                for root, dirs, files in os.walk("temp_shp"):
+                    for file in files:
+                        if file.lower().endswith(".shp"):
+                            target_shp = os.path.join(root, file)
+                            break
+                
+                if target_shp and convert_spatial_to_geojson(target_shp, source_crs):
+                    conversion_ready = True
+        
+        # 2. PMTiles 변환 및 업로드
+        if conversion_ready:
+            if convert_to_pmtiles():
+                if upload_to_r2(project_id, cache_control, source_crs):
+                    # DXF 타입인 경우에만 도면 연장/수량 재계산 수행
+                    if input_type == 'dxf':
+                        run_recalculation(project_id, "input.dxf")
+                    success = True
 
         if success:
-            # [추가] 프로젝트 상태를 COMPLETED로 업데이트 (웹 앱 알림용)
             supabase = get_supabase_client()
             if supabase:
                 supabase.table("cad_projects").update({"status": "COMPLETED"}).eq("id", project_id).execute()
             print("All steps completed successfully.")
         else:
+            print("Conversion process failed. Updating project status to FAILED...")
+            supabase = get_supabase_client()
+            if supabase and project_id:
+                supabase.table("cad_projects").update({"status": "FAILED"}).eq("id", project_id).execute()
             sys.exit(1)
             
     except json.JSONDecodeError:
