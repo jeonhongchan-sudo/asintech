@@ -567,15 +567,16 @@ def upload_to_r2(project_id, cache_control, source_crs):
                         "file_path": r2_key, 
                         "file_size": size,
                         "source_crs": source_crs,
-                        "updated_at": "now()"
+                        "updated_at": datetime.now(timezone.utc).isoformat()
                     }
                     # [추가] 캐시 만료 정보가 있으면 업데이트 데이터에 포함
                     if expiry_iso:
                         data["cache_expiry"] = expiry_iso
                     
-                    res = supabase.table("cad_files").select("id").eq("file_path", r2_key).execute()
-                    if res.data: supabase.table("cad_files").update(data).eq("file_path", r2_key).execute()
-                    else: supabase.table("cad_files").insert(data).execute()
+                    # [수정] 파일 경로가 아닌 프로젝트ID와 타입 기준으로 기존 레코드 삭제 후 삽입 (중복 방지)
+                    supabase.table("cad_files").delete().eq("project_id", project_id).eq("file_type", file_type).execute()
+                    supabase.table("cad_files").insert(data).execute()
+                    
                     print("  -> Supabase metadata updated.")
                 except Exception as e: print(f"  -> ❌ Supabase update failed: {e}")
             else: print("  -> ⚠️ Supabase client not available. Metadata update skipped.")
