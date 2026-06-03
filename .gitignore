@@ -13,3 +13,5 @@ __pycache__/
 temp_*.geojson
 auto_embed.py
 auto_embedding.yml
+convert_r2(백업).txt
+backup_to_drive(백업).txt
